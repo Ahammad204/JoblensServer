@@ -604,6 +604,62 @@ app.get("/api/learning/:id", async (req, res) => {
   }
 });
 
+// Get recommended jobs for a user
+app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
+  try {
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const userSkills = user.skills || [];
+    const userTrack = user.careerTrack || "";
+
+    // Fetch all jobs
+    const allJobs = await JobsCollection.find().toArray();
+
+    // Filter jobs with skill overlap or matching career track
+    const recommendedJobs = allJobs
+      .map((job) => {
+        const matches = job.skills.filter((skill) =>
+          userSkills.includes(skill)
+        );
+        const trackMatch = job.jobType.toLowerCase().includes(userTrack.toLowerCase());
+
+        return { ...job, matchSkills: matches, trackMatch };
+      })
+      .filter((job) => job.matchSkills.length > 0 || job.trackMatch);
+
+    res.status(200).json(recommendedJobs);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to get recommendations", error: err.message });
+  }
+});
+
+// Get recommended learning resources for a user
+app.get("/api/learning/recommend", verifyToken, async (req, res) => {
+  try {
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const userSkills = user.skills || [];
+
+    // Fetch all resources
+    const allResources = await LearningResourcesCollection.find().toArray();
+
+    // Filter resources that match user's skills
+    const recommendedResources = allResources
+      .map((res) => {
+        const matches = res.relatedSkills.filter((skill) =>
+          userSkills.includes(skill)
+        );
+        return { ...res, matchSkills: matches };
+      })
+      .filter((res) => res.matchSkills.length > 0);
+
+    res.status(200).json(recommendedResources);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to get learning recommendations", error: err.message });
+  }
+});
 
 
   } finally {
