@@ -22,7 +22,8 @@ const port = process.env.PORT || 5000;
 
 //Connect to MongoDB
 
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+
 const uri = process.env.MONGODB;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -184,6 +185,46 @@ async function run() {
         res.status(401).json({ message: "Unauthorized", error: err.message });
       }
     });
+    // Update user profile
+app.patch("/users/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Ensure the logged-in user can only update their own profile
+    const userInDb = await UsersCollection.findOne({ _id: new ObjectId(id) });
+    if (!userInDb) return res.status(404).json({ message: "User not found" });
+    if (userInDb.email !== req.user.email) {
+      return res.status(403).json({ message: "Forbidden: Cannot update other user's profile" });
+    }
+
+    const updateFields = { ...req.body };
+
+    // Prevent email change
+    if (updateFields.email) delete updateFields.email;
+
+    // Convert skills and preferredJobType to arrays if they are strings
+    if (updateFields.skills && !Array.isArray(updateFields.skills)) {
+      updateFields.skills = updateFields.skills.split(",").map(s => s.trim()).filter(Boolean);
+    }
+    if (updateFields.preferredJobType && !Array.isArray(updateFields.preferredJobType)) {
+      updateFields.preferredJobType = updateFields.preferredJobType.split(",").map(s => s.trim()).filter(Boolean);
+    }
+
+    // Update user
+    const result = await UsersCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updateFields },
+      { returnDocument: "after" }
+    );
+
+    res.status(200).json(result.value);
+  } catch (err) {
+    console.error("Profile Update Error:", err);
+    res.status(500).json({ message: "Failed to update profile", error: err.message });
+  }
+});
+
+
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
