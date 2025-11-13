@@ -63,6 +63,7 @@ async function run() {
     // ======================== All Collections =========================
     const UsersCollection = client.db("UserDB").collection("Users");
     const JobsCollection = client.db("JobsDB").collection("Jobs");
+    const LearningResourcesCollection = client.db("LearningDB").collection("LearningResources");
 
     // =============================== User Endpoints ==============================
     //Upload user to Database
@@ -188,203 +189,418 @@ async function run() {
       }
     });
     // Update user profile
-app.patch("/users/:id", verifyToken, async (req, res) => {
+    app.patch("/users/:id", verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        // Ensure the logged-in user can only update their own profile
+        const userInDb = await UsersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!userInDb)
+          return res.status(404).json({ message: "User not found" });
+        if (userInDb.email !== req.user.email) {
+          return res
+            .status(403)
+            .json({ message: "Forbidden: Cannot update other user's profile" });
+        }
+
+        const updateFields = { ...req.body };
+
+        // Prevent email change
+        if (updateFields.email) delete updateFields.email;
+
+        // Convert skills and preferredJobType to arrays if they are strings
+        if (updateFields.skills && !Array.isArray(updateFields.skills)) {
+          updateFields.skills = updateFields.skills
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+        if (
+          updateFields.preferredJobType &&
+          !Array.isArray(updateFields.preferredJobType)
+        ) {
+          updateFields.preferredJobType = updateFields.preferredJobType
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+
+        // Update user
+        const result = await UsersCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: updateFields },
+          { returnDocument: "after" }
+        );
+
+        res.status(200).json(result.value);
+      } catch (err) {
+        console.error("Profile Update Error:", err);
+        res
+          .status(500)
+          .json({ message: "Failed to update profile", error: err.message });
+      }
+    });
+
+    // ============================ Job Endpoints =======================================
+    // ===================== Seed Jobs =====================
+    app.post("/api/jobs/seed", async (req, res) => {
+      try {
+        const jobs = [
+          {
+            title: "Frontend Developer Intern",
+            company: "Nexgenix",
+            location: "Remote",
+            skills: ["React", "JavaScript", "Tailwind CSS"],
+            experienceLevel: "Beginner",
+            jobType: "Internship",
+          },
+          {
+            title: "Junior Backend Developer",
+            company: "CodeWave",
+            location: "Dhaka",
+            skills: ["Node.js", "Express", "MongoDB"],
+            experienceLevel: "Entry-level",
+            jobType: "Full-time",
+          },
+          {
+            title: "UI/UX Designer",
+            company: "Designify Studio",
+            location: "Chattogram",
+            skills: ["Figma", "Adobe XD", "Wireframing"],
+            experienceLevel: "Beginner",
+            jobType: "Part-time",
+          },
+          {
+            title: "WordPress Developer",
+            company: "WebMate",
+            location: "Remote",
+            skills: ["WordPress", "PHP", "HTML", "CSS"],
+            experienceLevel: "Entry-level",
+            jobType: "Freelance",
+          },
+          {
+            title: "Data Entry Operator",
+            company: "TechData BD",
+            location: "Dhaka",
+            skills: ["Excel", "Attention to Detail"],
+            experienceLevel: "Beginner",
+            jobType: "Part-time",
+          },
+          {
+            title: "Junior Mobile App Developer",
+            company: "AppLab",
+            location: "Remote",
+            skills: ["React Native", "JavaScript", "API Integration"],
+            experienceLevel: "Beginner",
+            jobType: "Internship",
+          },
+          {
+            title: "Social Media Marketing Intern",
+            company: "DigitalSphere",
+            location: "Chattogram",
+            skills: ["Canva", "Content Writing", "Meta Ads"],
+            experienceLevel: "Beginner",
+            jobType: "Internship",
+          },
+          {
+            title: "IT Support Assistant",
+            company: "SoftCare",
+            location: "Sylhet",
+            skills: ["Networking", "Troubleshooting", "Customer Support"],
+            experienceLevel: "Entry-level",
+            jobType: "Full-time",
+          },
+          {
+            title: "Graphic Designer",
+            company: "PixelCraft",
+            location: "Remote",
+            skills: ["Illustrator", "Photoshop", "Brand Design"],
+            experienceLevel: "Beginner",
+            jobType: "Freelance",
+          },
+          {
+            title: "Junior QA Tester",
+            company: "Testify BD",
+            location: "Dhaka",
+            skills: ["Testing", "Documentation", "Teamwork"],
+            experienceLevel: "Beginner",
+            jobType: "Internship",
+          },
+          {
+            title: "Content Writer",
+            company: "Penly Studio",
+            location: "Remote",
+            skills: ["SEO Writing", "Research", "English Proficiency"],
+            experienceLevel: "Entry-level",
+            jobType: "Freelance",
+          },
+          {
+            title: "Junior Web Developer",
+            company: "BrightWeb",
+            location: "Dhaka",
+            skills: ["HTML", "CSS", "JavaScript"],
+            experienceLevel: "Beginner",
+            jobType: "Full-time",
+          },
+          {
+            title: "Video Editor Intern",
+            company: "Vibe Media",
+            location: "Remote",
+            skills: ["Premiere Pro", "After Effects", "Storytelling"],
+            experienceLevel: "Beginner",
+            jobType: "Internship",
+          },
+          {
+            title: "Database Assistant",
+            company: "DataSync BD",
+            location: "Sylhet",
+            skills: ["SQL", "Excel", "Data Cleaning"],
+            experienceLevel: "Entry-level",
+            jobType: "Part-time",
+          },
+          {
+            title: "Junior Cloud Engineer",
+            company: "CloudBase",
+            location: "Dhaka",
+            skills: ["AWS", "Linux", "CI/CD"],
+            experienceLevel: "Entry-level",
+            jobType: "Full-time",
+          },
+        ];
+
+        await JobsCollection.insertMany(jobs);
+        res.status(201).json({ message: "Jobs seeded successfully" });
+      } catch (error) {
+        console.error("Job Seeding Error:", error);
+        res
+          .status(500)
+          .json({ message: "Failed to seed jobs", error: error.message });
+      }
+    });
+    // ===================== Get All Jobs =====================
+    app.get("/api/jobs", async (req, res) => {
+      try {
+        const jobs = await JobsCollection.find().toArray();
+        res.status(200).json(jobs);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to fetch jobs", error: error.message });
+      }
+    });
+    app.get("/api/jobs/:id", async (req, res) => {
+      try {
+        const job = await JobsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!job) return res.status(404).json({ message: "Job not found" });
+        res.status(200).json(job);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to fetch job", error: error.message });
+      }
+    });
+    app.post("/api/jobs", verifyToken, async (req, res) => {
+      try {
+        const job = req.body;
+        await JobsCollection.insertOne(job);
+        res.status(201).json({ message: "Job added successfully" });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Failed to add job", error: error.message });
+      }
+    });
+
+    // ========================== Resources Endpoints ==========================
+    app.post("/api/learning/seed", async (req, res) => {
   try {
-    const { id } = req.params;
-
-    // Ensure the logged-in user can only update their own profile
-    const userInDb = await UsersCollection.findOne({ _id: new ObjectId(id) });
-    if (!userInDb) return res.status(404).json({ message: "User not found" });
-    if (userInDb.email !== req.user.email) {
-      return res.status(403).json({ message: "Forbidden: Cannot update other user's profile" });
-    }
-
-    const updateFields = { ...req.body };
-
-    // Prevent email change
-    if (updateFields.email) delete updateFields.email;
-
-    // Convert skills and preferredJobType to arrays if they are strings
-    if (updateFields.skills && !Array.isArray(updateFields.skills)) {
-      updateFields.skills = updateFields.skills.split(",").map(s => s.trim()).filter(Boolean);
-    }
-    if (updateFields.preferredJobType && !Array.isArray(updateFields.preferredJobType)) {
-      updateFields.preferredJobType = updateFields.preferredJobType.split(",").map(s => s.trim()).filter(Boolean);
-    }
-
-    // Update user
-    const result = await UsersCollection.findOneAndUpdate(
-      { _id: new ObjectId(id) },
-      { $set: updateFields },
-      { returnDocument: "after" }
-    );
-
-    res.status(200).json(result.value);
-  } catch (err) {
-    console.error("Profile Update Error:", err);
-    res.status(500).json({ message: "Failed to update profile", error: err.message });
-  }
-});
-
-// ============================ Job Endpoints =======================================
-// ===================== Seed Jobs =====================
-app.post("/api/jobs/seed", async (req, res) => {
-  try {
-    const jobs = [
+    const resources = [
       {
-        title: "Frontend Developer Intern",
-        company: "Nexgenix",
-        location: "Remote",
-        skills: ["React", "JavaScript", "Tailwind CSS"],
-        experienceLevel: "Beginner",
-        jobType: "Internship",
+        title: "HTML Full Course for Beginners",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=pQN-pnXPaVg",
+        relatedSkills: ["HTML", "Web Development"],
+        cost: "Free",
       },
       {
-        title: "Junior Backend Developer",
-        company: "CodeWave",
-        location: "Dhaka",
-        skills: ["Node.js", "Express", "MongoDB"],
-        experienceLevel: "Entry-level",
-        jobType: "Full-time",
+        title: "JavaScript Basics",
+        platform: "Coursera",
+        url: "https://www.coursera.org/learn/javascript-basics",
+        relatedSkills: ["JavaScript"],
+        cost: "Free",
       },
       {
-        title: "UI/UX Designer",
-        company: "Designify Studio",
-        location: "Chattogram",
-        skills: ["Figma", "Adobe XD", "Wireframing"],
-        experienceLevel: "Beginner",
-        jobType: "Part-time",
+        title: "Responsive Web Design",
+        platform: "freeCodeCamp",
+        url: "https://www.freecodecamp.org/learn/responsive-web-design/",
+        relatedSkills: ["HTML", "CSS", "Design"],
+        cost: "Free",
       },
       {
-        title: "WordPress Developer",
-        company: "WebMate",
-        location: "Remote",
-        skills: ["WordPress", "PHP", "HTML", "CSS"],
-        experienceLevel: "Entry-level",
-        jobType: "Freelance",
+        title: "Advanced CSS and Sass",
+        platform: "Udemy",
+        url: "https://www.udemy.com/course/advanced-css-and-sass/",
+        relatedSkills: ["CSS", "Sass"],
+        cost: "Paid",
       },
       {
-        title: "Data Entry Operator",
-        company: "TechData BD",
-        location: "Dhaka",
-        skills: ["Excel", "Attention to Detail"],
-        experienceLevel: "Beginner",
-        jobType: "Part-time",
+        title: "React JS Crash Course",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=w7ejDZ8SWv8",
+        relatedSkills: ["React", "Frontend"],
+        cost: "Free",
       },
       {
-        title: "Junior Mobile App Developer",
-        company: "AppLab",
-        location: "Remote",
-        skills: ["React Native", "JavaScript", "API Integration"],
-        experienceLevel: "Beginner",
-        jobType: "Internship",
+        title: "MongoDB for Beginners",
+        platform: "Udemy",
+        url: "https://www.udemy.com/course/mongodb-the-complete-developers-guide/",
+        relatedSkills: ["MongoDB", "Database"],
+        cost: "Paid",
       },
       {
-        title: "Social Media Marketing Intern",
-        company: "DigitalSphere",
-        location: "Chattogram",
-        skills: ["Canva", "Content Writing", "Meta Ads"],
-        experienceLevel: "Beginner",
-        jobType: "Internship",
+        title: "Node.js and Express.js Fundamentals",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=Oe421EPjeBE",
+        relatedSkills: ["Node.js", "Express"],
+        cost: "Free",
       },
       {
-        title: "IT Support Assistant",
-        company: "SoftCare",
-        location: "Sylhet",
-        skills: ["Networking", "Troubleshooting", "Customer Support"],
-        experienceLevel: "Entry-level",
-        jobType: "Full-time",
+        title: "Intro to Communication Skills",
+        platform: "Coursera",
+        url: "https://www.coursera.org/learn/wharton-communication-skills",
+        relatedSkills: ["Communication", "Soft Skills"],
+        cost: "Free",
       },
       {
-        title: "Graphic Designer",
-        company: "PixelCraft",
-        location: "Remote",
-        skills: ["Illustrator", "Photoshop", "Brand Design"],
-        experienceLevel: "Beginner",
-        jobType: "Freelance",
+        title: "Learn Excel for Beginners",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=Vl0H-qTclOg",
+        relatedSkills: ["Excel", "Data Management"],
+        cost: "Free",
       },
       {
-        title: "Junior QA Tester",
-        company: "Testify BD",
-        location: "Dhaka",
-        skills: ["Testing", "Documentation", "Teamwork"],
-        experienceLevel: "Beginner",
-        jobType: "Internship",
+        title: "Python for Everybody",
+        platform: "Coursera",
+        url: "https://www.coursera.org/specializations/python",
+        relatedSkills: ["Python", "Programming"],
+        cost: "Free",
       },
       {
-        title: "Content Writer",
-        company: "Penly Studio",
-        location: "Remote",
-        skills: ["SEO Writing", "Research", "English Proficiency"],
-        experienceLevel: "Entry-level",
-        jobType: "Freelance",
+        title: "Intro to Data Analysis with Excel",
+        platform: "Udemy",
+        url: "https://www.udemy.com/course/microsoft-excel-data-analysis/",
+        relatedSkills: ["Excel", "Data Analysis"],
+        cost: "Paid",
       },
       {
-        title: "Junior Web Developer",
-        company: "BrightWeb",
-        location: "Dhaka",
-        skills: ["HTML", "CSS", "JavaScript"],
-        experienceLevel: "Beginner",
-        jobType: "Full-time",
+        title: "Canva Graphic Design Masterclass",
+        platform: "Udemy",
+        url: "https://www.udemy.com/course/canva-masterclass/",
+        relatedSkills: ["Design", "Canva"],
+        cost: "Paid",
       },
       {
-        title: "Video Editor Intern",
-        company: "Vibe Media",
-        location: "Remote",
-        skills: ["Premiere Pro", "After Effects", "Storytelling"],
-        experienceLevel: "Beginner",
-        jobType: "Internship",
+        title: "Learn Git & GitHub",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=RGOj5yH7evk",
+        relatedSkills: ["Git", "Version Control"],
+        cost: "Free",
       },
       {
-        title: "Database Assistant",
-        company: "DataSync BD",
-        location: "Sylhet",
-        skills: ["SQL", "Excel", "Data Cleaning"],
-        experienceLevel: "Entry-level",
-        jobType: "Part-time",
+        title: "Effective Presentation Skills",
+        platform: "Coursera",
+        url: "https://www.coursera.org/learn/presentation-skills",
+        relatedSkills: ["Communication", "Leadership"],
+        cost: "Free",
       },
       {
-        title: "Junior Cloud Engineer",
-        company: "CloudBase",
-        location: "Dhaka",
-        skills: ["AWS", "Linux", "CI/CD"],
-        experienceLevel: "Entry-level",
-        jobType: "Full-time",
+        title: "Project Management Basics",
+        platform: "Coursera",
+        url: "https://www.coursera.org/learn/project-management-principles",
+        relatedSkills: ["Project Management", "Organization"],
+        cost: "Free",
+      },
+      {
+        title: "Digital Marketing Fundamentals",
+        platform: "Google Digital Garage",
+        url: "https://learndigital.withgoogle.com/digitalgarage/course/digital-marketing",
+        relatedSkills: ["Marketing", "SEO", "Content"],
+        cost: "Free",
+      },
+      {
+        title: "UI/UX Design for Beginners",
+        platform: "YouTube",
+        url: "https://www.youtube.com/watch?v=c9Wg6Cb_YlU",
+        relatedSkills: ["UI/UX", "Design"],
+        cost: "Free",
+      },
+      {
+        title: "Advanced Excel Formulas & Functions",
+        platform: "Udemy",
+        url: "https://www.udemy.com/course/advanced-excel-formulas/",
+        relatedSkills: ["Excel", "Data Analysis"],
+        cost: "Paid",
+      },
+      {
+        title: "Machine Learning Crash Course",
+        platform: "Google",
+        url: "https://developers.google.com/machine-learning/crash-course",
+        relatedSkills: ["AI", "Machine Learning"],
+        cost: "Free",
+      },
+      {
+        title: "Personal Productivity",
+        platform: "Coursera",
+        url: "https://www.coursera.org/learn/work-smarter-not-harder",
+        relatedSkills: ["Productivity", "Soft Skills"],
+        cost: "Free",
       },
     ];
 
-    await JobsCollection.insertMany(jobs);
-    res.status(201).json({ message: "Jobs seeded successfully" });
+    await LearningResourcesCollection.insertMany(resources);
+    res.status(201).json({ message: "Learning resources seeded successfully" });
   } catch (error) {
-    console.error("Job Seeding Error:", error);
-    res.status(500).json({ message: "Failed to seed jobs", error: error.message });
+    console.error("Learning Seed Error:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to seed learning resources", error: error.message });
   }
 });
-// ===================== Get All Jobs =====================
-app.get("/api/jobs", async (req, res) => {
+app.get("/api/learning", async (req, res) => {
   try {
-    const jobs = await JobsCollection.find().toArray();
-    res.status(200).json(jobs);
+    const { skill, platform, cost } = req.query;
+    const query = {};
+
+    if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
+    if (platform) query.platform = { $regex: new RegExp(platform, "i") };
+    if (cost) query.cost = { $regex: new RegExp(cost, "i") };
+
+    const resources = await LearningResourcesCollection.find(query).toArray();
+    res.status(200).json(resources);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch jobs", error: error.message });
+    res.status(500).json({
+      message: "Failed to fetch learning resources",
+      error: error.message,
+    });
   }
 });
-app.get("/api/jobs/:id", async (req, res) => {
+app.get("/api/learning/:id", async (req, res) => {
   try {
-    const job = await JobsCollection.findOne({ _id: new ObjectId(req.params.id) });
-    if (!job) return res.status(404).json({ message: "Job not found" });
-    res.status(200).json(job);
+    const resource = await LearningResourcesCollection.findOne({
+      _id: new ObjectId(req.params.id),
+    });
+    if (!resource)
+      return res.status(404).json({ message: "Resource not found" });
+    res.status(200).json(resource);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch job", error: error.message });
-  }
-});
-app.post("/api/jobs", verifyToken, async (req, res) => {
-  try {
-    const job = req.body;
-    await JobsCollection.insertOne(job);
-    res.status(201).json({ message: "Job added successfully" });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to add job", error: error.message });
+    res.status(500).json({
+      message: "Failed to fetch resource",
+      error: error.message,
+    });
   }
 });
 
