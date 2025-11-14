@@ -294,6 +294,7 @@ Avoid unnecessary words
 
 
 
+
     // Get recommended jobs for a user
     app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
       try {
@@ -746,6 +747,76 @@ Avoid unnecessary words
         });
       }
     });
+    // POST /api/cv/generate
+app.post("/api/cv/generate", verifyToken, async (req, res) => {
+  try {
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).json({ message: "User not found" });
+console.log(user)
+    // Build prompt for AI
+    const prompt = `
+Generate a clean, professional CV layout for the following user:
+Name: ${user.name}
+Email: ${user.email}
+Education: ${user.education || "N/A"}
+Experience: ${user.experience || "N/A"}
+Skills: ${user.skills?.join(", ") || "N/A"}
+Tools: ${user.tools?.join(", ") || "N/A"}
+Career Track: ${user.careerTrack || "N/A"}
+
+Output format (JSON):
+{
+  "personalInfo": { "name": "...", "email": "...", "education": "..." },
+  "professionalSummary": "...",
+  "experience": [ { "role": "...", "company": "...", "duration": "...", "description": ["..."] } ],
+  "projects": [ { "title": "...", "description": ["..."] } ],
+  "skills": [ "..."],
+  "tools": [ "..."],
+  "recommendations": [ "...LinkedIn / portfolio tips..." ]
+}
+`;
+
+    const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "z-ai/glm-4.5-air:free",
+        messages: [
+          { role: "system", content: "You are a professional CV assistant." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.7,
+      }),
+    });
+
+    if (!aiResponse.ok) throw new Error("AI request failed");
+    const data = await aiResponse.json();
+
+    // const cvData = JSON.parse(data.choices[0].message.content);
+    let raw = data.choices[0].message.content.trim();
+
+// Remove code fences if present
+raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+// Now parse clean JSON
+const cvData = JSON.parse(raw);
+
+    
+    // Save CV data to user profile
+    await UsersCollection.updateOne(
+      { email: req.user.email },
+      { $set: { generatedCV: cvData } }
+    );
+
+    res.status(200).json(cvData);
+  } catch (err) {
+    console.error("CV Generation Error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
 
     // ============================ Job Endpoints =======================================
     // ===================== Seed Jobs =====================
