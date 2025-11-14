@@ -68,24 +68,24 @@ const mapUserExperience = (userExperience) => {
 
 // New logic to calculate match score and reasons
 const calculateMatchScore = (job, user) => {
-  const userSkills = user.skills || [];
-  const jobSkills = job.skills || [];
-  const userTrack = user.careerTrack || "";
-  const userExp = user.experience || "";
+ const userSkills = user.skills || [];
+ const jobSkills = job.skills || [];
+  userTrack = user.careerTrack || "";
+ const userExp = user.experience || "";
 
-  // 1. Skill Overlap (Weight 60%)
-  const matchedSkills = jobSkills.filter((skill) =>
-    userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
-  );
-  const missingSkills = jobSkills.filter((skill) =>
-    !userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
-  );
+// 1. Skill Overlap (Weight 60%)
+ const matchedSkills = jobSkills.filter((skill) =>
+ userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
+);
+ const missingSkills = jobSkills.filter((skill) =>
+!userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
+ );
 
-  const skillScore = jobSkills.length > 0 ? (matchedSkills.length / jobSkills.length) * 60 : 0;
+ const skillScore = jobSkills.length > 0 ? (matchedSkills.length / jobSkills.length) * 60 : 0;
 
-  // 2. Experience Alignment (Weight 20%)
-  const jobLevel = job.experienceLevel ? job.experienceLevel.toLowerCase() : "";
-  const mappedUserLevel = mapUserExperience(userExp).toLowerCase();
+ // 2. Experience Alignment (Weight 20%)
+ const jobLevel = job.experienceLevel ? job.experienceLevel.toLowerCase() : "";
+const mappedUserLevel = mapUserExperience(userExp).toLowerCase();
 
   let expScore = 0;
   let expReason = `Job requires **${job.experienceLevel || 'Unknown'}** experience.`;
@@ -138,7 +138,7 @@ const calculateMatchScore = (job, user) => {
   return {
     matchPercentage: totalScore,
     keyReasons: matchReasons,
-    matchedSkills: matchedSkills, // Included for reference, though not strictly needed for the FE display now
+    missingSkills: missingSkills, // <-- NEW: Return missing skills
     platforms: platforms
   };
 };
@@ -163,31 +163,64 @@ async function run() {
 
     // Get recommended jobs for a user
 app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
+    try {
+        const user = await UsersCollection.findOne({ email: req.user.email });
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        // Fetch all jobs
+        const allJobs = await JobsCollection.find().toArray();
+
+        // Calculate score for each job and enrich the data
+        const recommendedJobs = allJobs
+            .map((job) => {
+                const matchData = calculateMatchScore(job, user);
+                return { 
+                    ...job, 
+                    ...matchData,
+                };
+            })
+            // Filter out jobs with a match percentage below 30% for relevance
+            .filter((job) => job.matchPercentage > 30)
+            // Sort by match percentage descending
+            .sort((a, b) => b.matchPercentage - a.matchPercentage);
+
+        res.status(200).json(recommendedJobs);
+    } catch (err) {
+        console.error("Failed to get recommendations:", err);
+        res.status(500).json({ message: "Failed to get recommendations", error: err.message });
+    }
+});
+
+// NEW ENDPOINT: Get learning resources based on a list of MISSING skills
+app.post("/api/jobs/skill-gap-recommendations", verifyToken, async (req, res) => {
     try {
-        const user = await UsersCollection.findOne({ email: req.user.email });
-        if (!user) return res.status(404).json({ message: "User not found" });
+        const { missingSkills } = req.body; // Expecting an array of skills
 
-        // Fetch all jobs
-        const allJobs = await JobsCollection.find().toArray();
+        if (!missingSkills || missingSkills.length === 0) {
+            return res.status(200).json([]);
+        }
 
-        // Calculate score for each job and enrich the data
-        const recommendedJobs = allJobs
-            .map((job) => {
-                const matchData = calculateMatchScore(job, user);
-                return { 
-                    ...job, 
-                    ...matchData,
-                };
-            })
-            // Filter out jobs with a match percentage below 30% for relevance
-            .filter((job) => job.matchPercentage > 30)
-            // Sort by match percentage descending
-            .sort((a, b) => b.matchPercentage - a.matchPercentage);
+        // Find resources that cover any of the missing skills
+        const recommendedResources = await LearningResourcesCollection.find({
+            relatedSkills: { $in: missingSkills }
+        }).limit(5).toArray(); // Limit to 5 for a quick view
 
-        res.status(200).json(recommendedJobs);
+        // Enrich the resource data to show which missing skills it covers
+        const resourcesWithMatches = recommendedResources.map(resource => {
+            const relevantMissingSkills = resource.relatedSkills.filter(skill =>
+                missingSkills.includes(skill)
+            );
+            return {
+                ...resource,
+                relevantMissingSkills, // The skills that close the gap
+            };
+        });
+
+        res.status(200).json(resourcesWithMatches);
+
     } catch (err) {
-        console.error("Failed to get recommendations:", err);
-        res.status(500).json({ message: "Failed to get recommendations", error: err.message });
+        console.error("Failed to get skill gap recommendations:", err);
+        res.status(500).json({ message: "Failed to get skill gap recommendations", error: err.message });
     }
 });
 // Get recommended learning resources for a user
