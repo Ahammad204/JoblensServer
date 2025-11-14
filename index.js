@@ -143,7 +143,7 @@ const mappedUserLevel = mapUserExperience(userExp).toLowerCase();
   };
 };
 
-// ... replace the existing app.get("/api/jobs/recommend", ...) endpoint definition
+
 
 
 async function run() {
@@ -163,32 +163,32 @@ async function run() {
 
     // Get recommended jobs for a user
 app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
-    try {
-        const user = await UsersCollection.findOne({ email: req.user.email });
-        if (!user) return res.status(404).json({ message: "User not found" });
+    try {
+        const user = await UsersCollection.findOne({ email: req.user.email });
+        if (!user) return res.status(404).json({ message: "User not found" });
 
-        // Fetch all jobs
-        const allJobs = await JobsCollection.find().toArray();
+        // Fetch all jobs
+        const allJobs = await JobsCollection.find().toArray();
 
-        // Calculate score for each job and enrich the data
-        const recommendedJobs = allJobs
-            .map((job) => {
-                const matchData = calculateMatchScore(job, user);
-                return { 
-                    ...job, 
-                    ...matchData,
-                };
-            })
-            // Filter out jobs with a match percentage below 30% for relevance
-            .filter((job) => job.matchPercentage > 30)
-            // Sort by match percentage descending
-            .sort((a, b) => b.matchPercentage - a.matchPercentage);
+        // Calculate score for each job and enrich the data
+        const recommendedJobs = allJobs
+            .map((job) => {
+                const matchData = calculateMatchScore(job, user);
+                return { 
+                    ...job, 
+                    ...matchData,
+                };
+            })
+            // Filter out jobs with a match percentage below 30% for relevance
+            .filter((job) => job.matchPercentage > 30)
+            // Sort by match percentage descending
+            .sort((a, b) => b.matchPercentage - a.matchPercentage);
 
-        res.status(200).json(recommendedJobs);
-    } catch (err) {
-        console.error("Failed to get recommendations:", err);
-        res.status(500).json({ message: "Failed to get recommendations", error: err.message });
-    }
+        res.status(200).json(recommendedJobs);
+    } catch (err) {
+        console.error("Failed to get recommendations:", err);
+        res.status(500).json({ message: "Failed to get recommendations", error: err.message });
+    }
 });
 
 // NEW ENDPOINT: Get learning resources based on a list of MISSING skills
@@ -248,6 +248,132 @@ app.get("/api/learning/recommend", verifyToken, async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: "Failed to get learning recommendations", error: err.message });
   }
+});
+// NEW ENDPOINT: Generate personalized roadmap using AI
+// NEW ENDPOINT: Generate personalized roadmap using AI
+app.post("/api/roadmap/generate", verifyToken, async (req, res) => {
+    try {
+        const { targetRole, timeframe, learningTime, currentSkills } = req.body;
+        const user = await UsersCollection.findOne({ email: req.user.email });
+
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        // VITAL: Re-define systemPrompt and userPrompt here.
+        const systemPrompt = `You are a highly specialized Career Coach and AI Mentor. Your task is to generate a personalized career development roadmap. The roadmap must be a clear, actionable, step-by-step plan grouped by phases (Weeks/Months) for the user to achieve their target role.
+        
+        Roadmap Output Requirements (MUST be in JSON format):
+        {
+          "title": "Roadmap to [Target Role]",
+          "targetRole": "[The target role]",
+          "currentSkills": "[The list of current skills]",
+          "timeframe": "[The selected timeframe]",
+          "learningTime": "[User's available learning time]",
+          "applicationTime": "[A suggested point (e.g., 'End of Month 3') when the user should start applying for jobs/internships.]",
+          "phases": [
+            {
+              "phaseName": "Phase 1: Foundations (Month 1)",
+              "goal": "Build a strong foundation in core technologies.",
+              "steps": [
+                {"topic": "Specific Topic/Technology to learn", "details": "Key concepts to master.", "projectIdea": "Simple project idea related to this topic."},
+                // ... more steps
+              ]
+            },
+            // ... more phases
+          ]
+        }
+        
+        The 'phases' array should cover the full timeframe. Ensure the topics/technologies are **SPECIFIC** and the project ideas are **SIMPLE** (e.g., a "To-Do App" is too generic; specify features like "A Trello-style board using React and D&D API"). The output must be valid, stringified JSON only.`;
+
+        const userPrompt = `
+            Generate a roadmap based on the following:
+            - Target Role: ${targetRole}
+            - Timeframe: ${timeframe}
+            - Available Learning Time: ${learningTime || 'Not specified. Assume 10 hours/week.'}
+            - Current Skills (from profile/CV): ${currentSkills.join(', ') || 'None provided. Focus on foundational skills for the target role.'}
+        `;
+        // End of prompt definitions
+
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: "openai/gpt-oss-120b", 
+                messages: [
+                    { role: "system", content: systemPrompt }, // Now correctly scoped
+                    { role: "user", content: userPrompt }    // Now correctly scoped
+                ],
+                temperature: 0.7, 
+            })
+        });
+
+        // ... (The rest of the logic, including response checks, JSON parsing, and saving to MongoDB, should follow here) ...
+
+        // 1. Check for failed HTTP response from OpenRouter
+        if (!response.ok) {
+            const errorBody = await response.json().catch(() => ({ message: "Failed to parse API error response." }));
+            console.error("OpenRouter API Error:", response.status, errorBody);
+            throw new Error(`AI generation failed with status ${response.status}.`);
+        }
+
+        // 2. Parse the AI response and clean the JSON string
+        const aiResponse = await response.json();
+        let jsonString = aiResponse.choices[0].message.content.trim();
+        
+        // Remove Markdown code fences (```json ... ```) if the model added them
+        if (jsonString.startsWith('```json')) {
+            jsonString = jsonString.substring(7, jsonString.lastIndexOf('```')).trim();
+        }
+
+        const newRoadmap = JSON.parse(jsonString); // Parse the final JSON object
+
+        // 3. Save the roadmap to the user's profile
+        await UsersCollection.updateOne(
+            { email: req.user.email },
+            { $set: { roadmap: newRoadmap } }
+        );
+        
+        // 4. Send success response back to the client
+        res.status(200).json(newRoadmap);
+
+    } catch (err) {
+        console.error("Failed to generate and save roadmap:", err);
+        res.status(500).json({ 
+            message: "Failed to generate roadmap due to a server error. Check server logs.", 
+            error: err.message 
+        });
+    }
+});
+// NEW ENDPOINT: Get user's saved roadmap
+app.get("/api/roadmap", verifyToken, async (req, res) => {
+    try {
+        const user = await UsersCollection.findOne({ email: req.user.email }, { projection: { roadmap: 1 } });
+        if (!user || !user.roadmap) {
+            return res.status(404).json({ message: "Roadmap not found" });
+        }
+        res.status(200).json(user.roadmap);
+    } catch (err) {
+        console.error("Roadmap Fetch Error:", err);
+        res.status(500).json({ message: "Failed to fetch roadmap", error: err.message });
+    }
+});
+// NEW ENDPOINT: Fetch the existing roadmap
+app.get("/api/roadmap", verifyToken, async (req, res) => {
+    try {
+        const user = await UsersCollection.findOne({ email: req.user.email });
+
+        if (!user || !user.roadmap) {
+            // Return 404 if no roadmap exists, which the frontend will catch
+            return res.status(404).json({ message: "Roadmap not found." });
+        }
+
+        res.status(200).json(user.roadmap);
+    } catch (err) {
+        console.error("Failed to fetch roadmap:", err);
+        res.status(500).json({ message: "Failed to fetch roadmap", error: err.message });
+    }
 });
     // =============================== User Endpoints ==============================
     //Upload user to Database
