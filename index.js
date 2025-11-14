@@ -53,6 +53,98 @@ const verifyToken = (req, res, next) => {
     res.status(403).json({ message: "Forbidden: Invalid token" });
   }
 };
+// ... inside run() function, before the User Endpoints ...
+
+// Helper function to map user's general experience to a level for scoring
+const mapUserExperience = (userExperience) => {
+  // Simplistic mapping based on common job levels.
+  const exp = userExperience ? userExperience.toLowerCase() : "";
+  if (exp.includes("intern") || exp.includes("0-1") || exp.includes("beginner")) return "Beginner";
+  if (exp.includes("entry") || exp.includes("1-3") || exp.includes("junior")) return "Entry-level";
+  if (exp.includes("mid") || exp.includes("3-5")) return "Mid-level";
+  if (exp.includes("senior") || exp.includes("5+")) return "Senior";
+  return "Unknown";
+};
+
+// New logic to calculate match score and reasons
+const calculateMatchScore = (job, user) => {
+  const userSkills = user.skills || [];
+  const jobSkills = job.skills || [];
+  const userTrack = user.careerTrack || "";
+  const userExp = user.experience || "";
+
+  // 1. Skill Overlap (Weight 60%)
+  const matchedSkills = jobSkills.filter((skill) =>
+    userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
+  );
+  const missingSkills = jobSkills.filter((skill) =>
+    !userSkills.some(userSkill => skill.toLowerCase() === userSkill.toLowerCase())
+  );
+
+  const skillScore = jobSkills.length > 0 ? (matchedSkills.length / jobSkills.length) * 60 : 0;
+
+  // 2. Experience Alignment (Weight 20%)
+  const jobLevel = job.experienceLevel ? job.experienceLevel.toLowerCase() : "";
+  const mappedUserLevel = mapUserExperience(userExp).toLowerCase();
+
+  let expScore = 0;
+  let expReason = `Job requires **${job.experienceLevel || 'Unknown'}** experience.`;
+  
+  if (jobLevel === mappedUserLevel) {
+    expScore = 20;
+    expReason = "Experience level **Perfect Match**.";
+  } else if (mappedUserLevel === "unknown") {
+    expScore = 10; // Neutral score if user data is missing
+    expReason = "Experience level **Partial Match** (User experience not fully specified).";
+  } else if (jobLevel && mappedUserLevel) {
+    expReason = `Job requires **${job.experienceLevel}**, your level is **${mappedUserLevel.charAt(0).toUpperCase() + mappedUserLevel.slice(1)}** (Mismatch).`;
+  }
+
+  // 3. Career Track Alignment (Weight 20%)
+  const trackMatch = userTrack && (
+    job.jobType.toLowerCase().includes(userTrack.toLowerCase()) ||
+    job.title.toLowerCase().includes(userTrack.toLowerCase())
+  );
+
+  const trackScore = trackMatch ? 20 : 0;
+  const trackReason = trackMatch
+    ? `Career Track **${userTrack}** aligns with job type/title.`
+    : `Preferred track **${userTrack || 'N/A'}** does not directly match job type/title.`;
+
+  // Total Score
+  const totalScore = Math.round(skillScore + expScore + trackScore);
+
+  // Key Reasons for display
+  const matchReasons = [
+    `Skills Match: **${matchedSkills.length} of ${jobSkills.length}** required skills.`,
+    expReason,
+    trackReason,
+    matchedSkills.length > 0
+      ? `Matches: ${matchedSkills.join(", ")}`
+      : "No core skill matches found.",
+    missingSkills.length > 0
+      ? `Missing: ${missingSkills.join(", ")}`
+      : "All required skills match.",
+  ];
+  
+  // External Platforms (Static Guidance) - Dynamic link creation
+  const encodedTitle = encodeURIComponent(job.title);
+  const platforms = [
+    { name: "LinkedIn", url: `https://www.linkedin.com/search/results/all/?keywords=${encodedTitle}` },
+    { name: "Glassdoor", url: `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodedTitle}` },
+    { name: "BDjobs", url: `https://www.bdjobs.com/jobsearch.asp?keyword=${encodedTitle}` },
+  ];
+
+  return {
+    matchPercentage: totalScore,
+    keyReasons: matchReasons,
+    matchedSkills: matchedSkills, // Included for reference, though not strictly needed for the FE display now
+    platforms: platforms
+  };
+};
+
+// ... replace the existing app.get("/api/jobs/recommend", ...) endpoint definition
+
 
 async function run() {
   try {
@@ -69,6 +161,61 @@ async function run() {
     const JobsCollection = client.db("JobsDB").collection("Jobs");
     const LearningResourcesCollection = client.db("LearningDB").collection("LearningResources");
 
+    // Get recommended jobs for a user
+app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
+    try {
+        const user = await UsersCollection.findOne({ email: req.user.email });
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        // Fetch all jobs
+        const allJobs = await JobsCollection.find().toArray();
+
+        // Calculate score for each job and enrich the data
+        const recommendedJobs = allJobs
+            .map((job) => {
+                const matchData = calculateMatchScore(job, user);
+                return { 
+                    ...job, 
+                    ...matchData,
+                };
+            })
+            // Filter out jobs with a match percentage below 30% for relevance
+            .filter((job) => job.matchPercentage > 30)
+            // Sort by match percentage descending
+            .sort((a, b) => b.matchPercentage - a.matchPercentage);
+
+        res.status(200).json(recommendedJobs);
+    } catch (err) {
+        console.error("Failed to get recommendations:", err);
+        res.status(500).json({ message: "Failed to get recommendations", error: err.message });
+    }
+});
+// Get recommended learning resources for a user
+app.get("/api/learning/recommend", verifyToken, async (req, res) => {
+  try {
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const userSkills = user.skills || [];
+
+    // Fetch all resources
+    const allResources = await LearningResourcesCollection.find().toArray();
+
+    // Filter resources that match user's skills
+    const recommendedResources = allResources
+      .map((res) => {
+        const matches = res.relatedSkills.filter((skill) =>
+          userSkills.includes(skill)
+        );
+        return { ...res, matchSkills: matches };
+      })
+      .filter((res) => res.matchSkills.length > 0);
+
+    res.status(200).json(recommendedResources);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to get learning recommendations", error: err.message });
+  }
+});
     // =============================== User Endpoints ==============================
     //Upload user to Database
     app.post("/api/register", async (req, res) => {
@@ -453,6 +600,85 @@ app.post("/api/cv/save", verifyToken, async (req, res) => {
           .json({ message: "Failed to add job", error: error.message });
       }
     });
+//     app.get("/api/jobs/match", verifyToken, async (req, res) => {
+//   try {
+//     const user = await UsersCollection.findOne({ email: req.user.email });
+//     if (!user) return res.status(404).json({ message: "User not found" });
+
+    
+
+//     const userSkills = user.skills || [];
+//     const userExperience = user.experience || ""; // e.g., "Beginner", "Entry-level"
+//     const userTrack = user.careerTrack || "";
+
+//     console.log(userSkills)
+
+//     const allJobs = await JobsCollection.find().toArray();
+
+//     const scoredJobs = allJobs.map((job) => {
+//       // Skills match
+//       const matchedSkills = job.skills.filter((skill) =>
+//         userSkills.includes(skill)
+//       );
+//       const skillScore = (matchedSkills.length / job.skills.length) * 50; // 50% weight
+
+//       // Experience match
+//       const expScore = job.experienceLevel
+//         .toLowerCase()
+//         .includes(userExperience.toLowerCase())
+//         ? 25
+//         : 0; // 25% weight
+
+//       // Career track / job type match
+//       const trackScore = job.jobType
+//         .toLowerCase()
+//         .includes(userTrack.toLowerCase())
+//         ? 25
+//         : 0; // 25% weight
+
+//       const totalScore = skillScore + expScore + trackScore;
+
+//       // Key reasons
+//       const missingSkills = job.skills.filter(
+//         (skill) => !userSkills.includes(skill)
+//       );
+//       const reasons = [
+//         matchedSkills.length
+//           ? `Matches: ${matchedSkills.join(", ")}`
+//           : "No matching skills",
+//         missingSkills.length
+//           ? `Missing: ${missingSkills.join(", ")}`
+//           : null,
+//         expScore ? `Experience matches (${userExperience})` : null,
+//         trackScore ? `Track matches (${userTrack})` : null,
+//       ]
+//         .filter(Boolean)
+//         .join("; ");
+
+//       return {
+//         ...job,
+//         matchScore: Math.round(totalScore),
+//         keyReasons: reasons,
+//         applyPlatforms: [
+//           { name: "LinkedIn", url: "https://www.linkedin.com/jobs/" },
+//           { name: "BDJobs", url: "https://www.bdjobs.com/" },
+//           { name: "Glassdoor", url: "https://www.glassdoor.com/Job/index.htm" },
+//         ],
+//       };
+//     });
+
+//     // Sort by highest match
+//     scoredJobs.sort((a, b) => b.matchScore - a.matchScore);
+
+//     res.status(200).json(scoredJobs);
+//   } catch (err) {
+//     console.error("Job Match Error:", err);
+//     res
+//       .status(500)
+//       .json({ message: "Failed to get job matches", error: err.message });
+//   }
+// });
+
 
     // ========================== Resources Endpoints ==========================
     app.post("/api/learning/seed", async (req, res) => {
@@ -643,62 +869,7 @@ app.get("/api/learning/:id", async (req, res) => {
   }
 });
 
-// Get recommended jobs for a user
-app.get("/api/jobs/recommend", verifyToken, async (req, res) => {
-  try {
-    const user = await UsersCollection.findOne({ email: req.user.email });
-    if (!user) return res.status(404).json({ message: "User not found" });
 
-    const userSkills = user.skills || [];
-    const userTrack = user.careerTrack || "";
-
-    // Fetch all jobs
-    const allJobs = await JobsCollection.find().toArray();
-
-    // Filter jobs with skill overlap or matching career track
-    const recommendedJobs = allJobs
-      .map((job) => {
-        const matches = job.skills.filter((skill) =>
-          userSkills.includes(skill)
-        );
-        const trackMatch = job.jobType.toLowerCase().includes(userTrack.toLowerCase());
-
-        return { ...job, matchSkills: matches, trackMatch };
-      })
-      .filter((job) => job.matchSkills.length > 0 || job.trackMatch);
-
-    res.status(200).json(recommendedJobs);
-  } catch (err) {
-    res.status(500).json({ message: "Failed to get recommendations", error: err.message });
-  }
-});
-
-// Get recommended learning resources for a user
-app.get("/api/learning/recommend", verifyToken, async (req, res) => {
-  try {
-    const user = await UsersCollection.findOne({ email: req.user.email });
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    const userSkills = user.skills || [];
-
-    // Fetch all resources
-    const allResources = await LearningResourcesCollection.find().toArray();
-
-    // Filter resources that match user's skills
-    const recommendedResources = allResources
-      .map((res) => {
-        const matches = res.relatedSkills.filter((skill) =>
-          userSkills.includes(skill)
-        );
-        return { ...res, matchSkills: matches };
-      })
-      .filter((res) => res.matchSkills.length > 0);
-
-    res.status(200).json(recommendedResources);
-  } catch (err) {
-    res.status(500).json({ message: "Failed to get learning recommendations", error: err.message });
-  }
-});
 // ================= Google Gemini ================
 // Gemini CV analysis endpoint
 
