@@ -6,7 +6,7 @@ const cookieParser = require("cookie-parser");
 const app = express();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 //Middleware
 app.use(
   cors({
@@ -14,6 +14,12 @@ app.use(
     credentials: true,
   })
 );
+// app.use(
+//   cors({
+//     origin: ["https://joblenss.netlify.app"],
+//     credentials: true,
+//   })
+// );
 app.use(express.json());
 app.use(cookieParser());
 
@@ -35,11 +41,9 @@ const client = new MongoClient(uri, {
   },
 });
 const verifyToken = (req, res, next) => {
-  const token = req.cookies.token;
+  const token = req.cookies.token || req.headers.authorization?.split(" ")[1];
 
-  if (!token) {
-    return res.status(401).json({ message: "Unauthorized: No token" });
-  }
+  if (!token) return res.status(401).json({ message: "Unauthorized: No token" });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -113,12 +117,13 @@ async function run() {
         });
 
         // Set cookie
-        res.cookie("token", token, {
-          httpOnly: true,
-          secure: true, // required for cross-site cookies
-          sameSite: "none", // required for cross-site cookies
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        });
+     res.cookie("token", token, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production", // only secure in prod
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+});
+
 
         res.status(201).json({
           message: "Registration successful",
@@ -242,6 +247,40 @@ async function run() {
           .json({ message: "Failed to update profile", error: err.message });
       }
     });
+// Save CV analysis results to user profile
+app.post("/api/cv/save", verifyToken, async (req, res) => {
+  try {
+    const { skills, tools, roles, explain } = req.body;
+
+    if (!skills || !tools || !roles) {
+      return res.status(400).json({ message: "CV analysis data is required" });
+    }
+
+    const result = await UsersCollection.findOneAndUpdate(
+      { email: req.user.email },
+      {
+        $set: {
+          skills,
+          tools,
+          roles,
+          cvAnalysis: { explain, updatedAt: new Date() },
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    res.status(200).json({
+      message: "CV analysis saved successfully",
+      user: result.value,
+    });
+  } catch (err) {
+    console.error("Save CV Analysis Error:", err);
+    res.status(500).json({
+      message: "Failed to save CV analysis",
+      error: err.message,
+    });
+  }
+});
 
     // ============================ Job Endpoints =======================================
     // ===================== Seed Jobs =====================
@@ -658,6 +697,70 @@ app.get("/api/learning/recommend", verifyToken, async (req, res) => {
     res.status(200).json(recommendedResources);
   } catch (err) {
     res.status(500).json({ message: "Failed to get learning recommendations", error: err.message });
+  }
+});
+// ================= Google Gemini ================
+// Gemini CV analysis endpoint
+
+
+app.post("/api/cv/analyze", verifyToken, async (req, res) => {
+  try {
+    const { cvText } = req.body;
+
+    if (!cvText) {
+      return res.status(400).json({ message: "CV text required" });
+    }
+
+    const prompt = `
+Extract strictly:
+1. Key skills
+2. Tools / technologies
+3. Relevant roles/domains
+
+Return ONLY raw JSON with keys: skills, tools, roles.
+No explanation text.
+
+CV:
+${cvText}
+`;
+
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-20b:free",
+        messages: [
+          {
+            role: "user",
+            content: prompt
+          }
+        ]
+      })
+    });
+
+    
+    const result = await response.json();
+console.log(result)
+    const rawText =
+      result?.choices?.[0]?.message?.content?.trim() || "{}";
+
+    let clean = rawText;
+
+    if (clean.startsWith("```json")) {
+      clean = clean.replace(/```json|```/g, "").trim();
+    }
+
+    const parsed = JSON.parse(clean);
+    
+
+    res.status(200).json({ data: parsed });
+  } catch (err) {
+    console.error("OpenRouter Error:", err);
+    res.status(500).json({ message: "OpenRouter failed", error: err.message });
   }
 });
 
