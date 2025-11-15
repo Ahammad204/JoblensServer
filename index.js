@@ -409,6 +409,8 @@ Avoid unnecessary words
         const { targetRole, timeframe, learningTime, currentSkills } = req.body;
         const user = await UsersCollection.findOne({ email: req.user.email });
 
+        console.log(req.user.email);
+
         if (!user) return res.status(404).json({ message: "User not found" });
 
         // VITAL: Re-define systemPrompt and userPrompt here.
@@ -1377,6 +1379,124 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
   } catch (err) {
     console.error("Delete Job Error:", err);
     res.status(500).json({ message: "Failed to delete job", error: err.message });
+  }
+});
+// ===== Get All Resources =====
+app.get("/api/learning", async (req, res) => {
+  try {
+    const { skill, platform, cost } = req.query;
+    const query = {};
+
+    if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
+    if (platform) query.platform = { $regex: new RegExp(platform, "i") };
+    if (cost) query.cost = { $regex: new RegExp(cost, "i") };
+
+    const resources = await LearningResourcesCollection.find(query).toArray();
+    res.status(200).json(resources);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch resources", error: error.message });
+  }
+});
+
+// ===== Get Resource by ID =====
+app.get("/api/learning/:id", async (req, res) => {
+  try {
+    const resource = await LearningResourcesCollection.findOne({ _id: new ObjectId(req.params.id) });
+    if (!resource) return res.status(404).json({ message: "Resource not found" });
+    res.status(200).json(resource);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch resource", error: error.message });
+  }
+});
+
+// ===== Create Resource =====
+app.post("/api/learning", async (req, res) => {
+  try {
+    const resource = req.body;
+    await LearningResourcesCollection.insertOne(resource);
+    res.status(201).json({ message: "Resource added successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to add resource", error: error.message });
+  }
+});
+
+// ===== Delete Resource =====
+app.delete("/api/learning/:id", async (req, res) => {
+  try {
+    const result = await LearningResourcesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+    if (result.deletedCount === 0) return res.status(404).json({ message: "Resource not found" });
+    res.status(200).json({ message: "Resource deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete resource", error: error.message });
+  }
+});
+
+// ===== Update Resource (Optional) =====
+app.patch("/api/learning/:id", async (req, res) => {
+  try {
+    const updates = req.body;
+    const result = await LearningResourcesCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: updates }
+    );
+    if (result.matchedCount === 0) return res.status(404).json({ message: "Resource not found" });
+    res.status(200).json({ message: "Resource updated successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update resource", error: error.message });
+  }
+});
+// GET /api/admin/analytics
+app.get("/api/admin/analytics", verifyToken, async (req, res) => {
+  try {
+    // Only admins can access
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user || user.role !== "admin")
+      return res.status(403).json({ message: "Forbidden: Admins only" });
+
+    // Number of users analyzed (users who have CV analysis)
+    const usersAnalyzed = await UsersCollection.countDocuments({
+      cvAnalysis: { $exists: true },
+    });
+
+    // Total number of jobs suggested (for simplicity, total jobs in DB)
+    const jobsSuggested = await JobsCollection.countDocuments();
+
+    // Most in-demand skills (top skills across all users)
+    const allUsers = await UsersCollection.find().toArray();
+    const skillCount = {};
+    allUsers.forEach(u => {
+      (u.skills || []).forEach(skill => {
+        skillCount[skill] = (skillCount[skill] || 0) + 1;
+      });
+    });
+    const mostInDemandSkills = Object.entries(skillCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5) // top 5 skills
+      .map(([skill, count]) => ({ skill, count }));
+
+    // Common gaps (skills missing in users compared to jobs)
+    const allJobs = await JobsCollection.find().toArray();
+    const requiredSkills = new Set();
+    allJobs.forEach(job => {
+      (job.skills || []).forEach(skill => requiredSkills.add(skill));
+    });
+
+    const userSkillsSet = new Set();
+    allUsers.forEach(u => {
+      (u.skills || []).forEach(skill => userSkillsSet.add(skill));
+    });
+
+    const commonGaps = [...requiredSkills].filter(skill => !userSkillsSet.has(skill));
+
+    res.status(200).json({
+      usersAnalyzed,
+      jobsSuggested,
+      mostInDemandSkills,
+      commonGaps,
+    });
+  } catch (err) {
+    console.error("Admin Analytics Error:", err);
+    res.status(500).json({ message: "Failed to fetch analytics", error: err.message });
   }
 });
 
