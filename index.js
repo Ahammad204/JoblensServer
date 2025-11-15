@@ -710,6 +710,14 @@ Avoid unnecessary words
           .json({ message: "Failed to update profile", error: err.message });
       }
     });
+    //Check admin or not
+    app.get("/users/admin/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const user = await UsersCollection.findOne({ email });
+
+      res.send({ isAdmin: user?.role === "admin" });
+    });
+    
 
     // Save CV analysis results to user profile
     app.post("/api/cv/save", verifyToken, async (req, res) => {
@@ -989,6 +997,30 @@ const cvData = JSON.parse(raw);
           .json({ message: "Failed to add job", error: error.message });
       }
     });
+    // DELETE a job by ID
+app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Optional: Check if the user is admin before allowing deletion
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden: Admins only" });
+    }
+
+    const result = await JobsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    res.status(200).json({ message: "Job deleted successfully" });
+  } catch (err) {
+    console.error("Delete Job Error:", err);
+    res.status(500).json({ message: "Failed to delete job", error: err.message });
+  }
+});
+
     //     app.get("/api/jobs/match", verifyToken, async (req, res) => {
     //   try {
     //     const user = await UsersCollection.findOne({ email: req.user.email });
@@ -1325,6 +1357,29 @@ ${cvText}
           .json({ message: "OpenRouter failed", error: err.message });
       }
     });
+    // DELETE a specific job
+app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Optional: check if user is admin
+    const user = await UsersCollection.findOne({ email: req.user.email });
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden: Admins only" });
+    }
+
+    const result = await JobsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0)
+      return res.status(404).json({ message: "Job not found" });
+
+    res.status(200).json({ message: "Job deleted successfully" });
+  } catch (err) {
+    console.error("Delete Job Error:", err);
+    res.status(500).json({ message: "Failed to delete job", error: err.message });
+  }
+});
+
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
