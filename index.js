@@ -724,7 +724,7 @@ Avoid unnecessary words
     // Save CV analysis results to user profile
     app.post("/api/cv/save", verifyToken, async (req, res) => {
       try {
-        const { skills, tools, roles, explain } = req.body;
+        const { skills, tools, roles, explain, mlPrediction } = req.body;
 
         if (!skills || !tools || !roles) {
           return res
@@ -740,6 +740,7 @@ Avoid unnecessary words
               tools,
               roles,
               cvAnalysis: { explain, updatedAt: new Date() },
+              ...(mlPrediction ? { mlPrediction } : {}),
             },
           },
           { returnDocument: "after" }
@@ -1357,6 +1358,64 @@ ${cvText}
         res
           .status(500)
           .json({ message: "OpenRouter failed", error: err.message });
+      }
+    });
+
+    // ================= Trained ML model (Linear SVM) ================
+    // Forwards CV text to the FastAPI ML service (ml-service/) and
+    // returns the predicted job category + top-3. This is an extra
+    // signal shown next to the rule-based matcher — the rule-based
+    // matching code is untouched. Requires ML_SERVICE_URL env var.
+    app.post("/api/ml/predict", verifyToken, async (req, res) => {
+      try {
+        const { cvText } = req.body;
+        if (!cvText) {
+          return res.status(400).json({ message: "CV text required" });
+        }
+        const mlServiceUrl = process.env.ML_SERVICE_URL;
+        if (!mlServiceUrl) {
+          return res.status(503).json({
+            message:
+              "ML service is not configured (set ML_SERVICE_URL). See ml-service/README.md.",
+          });
+        }
+        const controller = new AbortController();
+        const timeoutMs = Number(process.env.ML_TIMEOUT_MS || 8000);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        let response;
+        try {
+          response = await fetch(
+            `${mlServiceUrl.replace(/\/$/, "")}/predict`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ cv_text: cvText }),
+              signal: controller.signal,
+            }
+          );
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          return res.status(502).json({
+            message: "ML service returned an error",
+            error: detail.slice(0, 300),
+          });
+        }
+        const prediction = await response.json();
+        res.status(200).json({ data: prediction });
+      } catch (err) {
+        if (err.name === "AbortError") {
+          return res.status(502).json({
+            message:
+              "ML service timed out (it may be waking up — please retry in a few seconds)",
+          });
+        }
+        console.error("ML Service Error:", err);
+        res
+          .status(502)
+          .json({ message: "ML service unreachable", error: err.message });
       }
     });
     // DELETE a specific job

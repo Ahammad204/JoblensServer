@@ -1,0 +1,9 @@
+# JobLens ML service — Python dependencies
+# scikit-learn is pinned to 1.6.1: the model pickle was trained with
+# scikit-learn 1.6.1 in Colab, and unpickling across major versions
+# raises InconsistentVersionWarning / can break. Keep this pin.
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29
+scikit-learn==1.6.1
+joblib>=1.3
+numpy>=1.26
