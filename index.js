@@ -22,18 +22,14 @@ const port = process.env.PORT || 5000;
 
 //Connect to MongoDB
 
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { MongoClient, ObjectId } = require("mongodb");
 
 const uri = process.env.MONGODB;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
+// Create a MongoClient (plain options: the old production build connects
+// with defaults, while ServerApiVersion.v1 strict failed server selection
+// on every cold start of the new deployment — see git history if needed)
+const client = new MongoClient(uri);
 
 // ... inside run() function, before the User Endpoints ...
 
