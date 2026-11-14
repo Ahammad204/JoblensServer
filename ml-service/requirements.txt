@@ -2,8 +2,11 @@
 # scikit-learn is pinned to 1.6.1: the model pickle was trained with
 # scikit-learn 1.6.1 in Colab, and unpickling across major versions
 # raises InconsistentVersionWarning / can break. Keep this pin.
+#
+# No uvicorn here: on Vercel the Python runtime serves the FastAPI
+# ASGI app directly (api/index.py re-exports it). uvicorn is still
+# what you use for local testing — see "Test locally" in README.md.
 fastapi>=0.110,<1
-uvicorn[standard]>=0.29
 scikit-learn==1.6.1
 joblib>=1.3
 numpy>=1.26

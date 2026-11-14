@@ -56,15 +56,22 @@ def load_model():
     """Load the pickle from disk, or download it once from MODEL_URL."""
     global model, model_error
     try:
-        if not MODEL_PATH.exists() and MODEL_URL:
-            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        if not MODEL_PATH.exists():
+        path = MODEL_PATH
+        if not path.exists() and MODEL_URL:
+            # Vercel functions run on a read-only filesystem except /tmp —
+            # if the project folder cannot be written, download there.
+            try:
+                urllib.request.urlretrieve(MODEL_URL, path)
+            except OSError:
+                path = Path("/tmp") / MODEL_FILENAME
+                urllib.request.urlretrieve(MODEL_URL, path)
+        if not path.exists():
             model_error = (
                 f"{MODEL_FILENAME} not found in ml-service/ and no "
                 "MODEL_URL is set. See ml-service/README.md."
             )
             return
-        model = joblib.load(MODEL_PATH)
+        model = joblib.load(path)
     except Exception as exc:  # keep the service up so /health can report it
         model_error = f"Failed to load model: {exc}"
         model = None
