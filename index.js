@@ -3,6 +3,7 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const cookieParser = require("cookie-parser");
+const nodemailer = require("nodemailer");
 const app = express();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -25,6 +26,17 @@ const port = process.env.PORT || 5000;
 const { MongoClient, ObjectId } = require("mongodb");
 
 const uri = process.env.MONGODB;
+
+// Password-reset emails (ported from the old server.js
+// src/routes/resetPassword.routes.js). Nodemailer is lazy: creating the
+// transporter here opens no connection at startup.
+const resetTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 // Create a MongoClient. Do NOT call await client.connect() at startup:
 // the driver connects lazily on first use, exactly like the old server.js
@@ -626,6 +638,67 @@ Avoid unnecessary words
       });
 
       res.status(200).json({ message: "Logout successful" });
+    });
+
+    // POST /api/forgot-password - Send reset link to email
+    // (ported from the old server.js src/routes/resetPassword.routes.js)
+    app.post("/api/forgot-password", async (req, res) => {
+      try {
+        const { email } = req.body;
+
+        const user = await UsersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Create a reset token (expires in 15 minutes)
+        const resetToken = jwt.sign({ email }, process.env.JWT_SECRET, {
+          expiresIn: "15m",
+        });
+
+        // Send email with reset link
+        const resetLink = `${process.env.CLIENT_URL || "https://joblenss.netlify.app"}/reset-password/${resetToken}`;
+
+        await resetTransporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "Joblens - Password Reset",
+          html: `
+            <h2>Password Reset Request</h2>
+            <p>Click the link below to reset your password. This link expires in 15 minutes.</p>
+            <a href="${resetLink}">${resetLink}</a>
+            <p>If you didn't request this, please ignore this email.</p>
+          `,
+        });
+
+        res.status(200).json({ message: "Reset link sent to your email" });
+      } catch (error) {
+        console.error("Forgot password error:", error);
+        res.status(500).json({ message: "Failed to send reset email", error: error.message });
+      }
+    });
+
+    // POST /api/reset-password - Reset password with token
+    app.post("/api/reset-password", async (req, res) => {
+      try {
+        const { token, newPassword } = req.body;
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+        await UsersCollection.updateOne(
+          { email: decoded.email },
+          { $set: { password: hashedPassword } }
+        );
+
+        res.status(200).json({ message: "Password reset successful" });
+      } catch (error) {
+        if (error.name === "TokenExpiredError") {
+          return res.status(400).json({ message: "Reset link has expired" });
+        }
+        res.status(400).json({ message: "Invalid reset token" });
+      }
     });
 
     //Check if user is logged in
