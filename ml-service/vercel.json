@@ -1,1 +1,1 @@
-{"$schema":"https://openapi.vercel.sh/vercel.json","functions":{"api/index.py":{"includeFiles":["app.py","joblens_best_model.pkl"]}},"rewrites":[{"destination":"/api/index","source":"/(.*)"}]}
+{"$schema":"https://openapi.vercel.sh/vercel.json","functions":{"api/index.py":{"includeFiles":"{app.py,joblens_best_model.pkl}"}},"rewrites":[{"destination":"/api/index","source":"/(.*)"}]}
