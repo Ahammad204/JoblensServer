@@ -26,9 +26,10 @@ const { MongoClient, ObjectId } = require("mongodb");
 
 const uri = process.env.MONGODB;
 
-// Create a MongoClient (plain options: the old production build connects
-// with defaults, while ServerApiVersion.v1 strict failed server selection
-// on every cold start of the new deployment — see git history if needed)
+// Create a MongoClient. Do NOT call await client.connect() at startup:
+// the driver connects lazily on first use, exactly like the old server.js
+// code (whose connect + ping were commented out). Awaiting the connect at
+// cold start hangs server selection for 30s and leaves no routes registered.
 const client = new MongoClient(uri);
 
 // ... inside run() function, before the User Endpoints ...
@@ -147,13 +148,8 @@ const calculateMatchScore = (job, user) => {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // NOTE: no explicit client.connect() / ping here on purpose — the driver
+    // connects lazily on first query, like the old server.js code.
 
     // ======================== All Collections =========================
     const UsersCollection = client.db("UserDB").collection("Users");
@@ -1554,7 +1550,7 @@ app.get("/api/admin/analytics", verifyToken, async (req, res) => {
     // await client.close();
   }
 }
-run().catch(console.dir);
+run().catch((err) => console.error("Server startup failed:", err));
 
 //For knowing that server is working or not
 app.get("/", (req, res) => {
