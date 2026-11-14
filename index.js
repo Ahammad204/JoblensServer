@@ -10,16 +10,10 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 //Middleware
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173", "https://joblenss.netlify.app"],
     credentials: true,
   })
 );
-// app.use(
-//   cors({
-//     origin: ["https://joblenss.netlify.app"],
-//     credentials: true,
-//   })
-// );
 app.use(express.json());
 app.use(cookieParser());
 
