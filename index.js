@@ -29,7 +29,12 @@ const uri = process.env.MONGODB;
 // Create a MongoClient (plain options: the old production build connects
 // with defaults, while ServerApiVersion.v1 strict failed server selection
 // on every cold start of the new deployment — see git history if needed)
-const client = new MongoClient(uri);
+// TEMPORARY experiment: disable happy-eyeballs address selection — if the
+// driver is picking a blackholed IPv6 address, use the first resolved one.
+const client = new MongoClient(uri, { autoSelectFamily: false });
+
+// TEMPORARY diagnostics (remove once the Atlas connect issue is solved):
+console.log("RUNTIME node", process.version, "mongodb driver", require("mongodb/package.json").version);
 
 // ... inside run() function, before the User Endpoints ...
 
@@ -1554,7 +1559,22 @@ app.get("/api/admin/analytics", verifyToken, async (req, res) => {
     // await client.close();
   }
 }
-run().catch(console.dir);
+run().catch((err) => {
+  // TEMPORARY diagnostics (remove once the Atlas connect issue is solved):
+  // console.dir collapses the per-server errors to "[ServerDescription]";
+  // print them explicitly so the logs show the real cause (auth vs network).
+  console.error("MONGO CONNECT FAILED:", err && err.message);
+  try {
+    const servers = err && err.reason && err.reason.servers;
+    if (servers) {
+      for (const [addr, desc] of servers) {
+        const e = desc && desc.error;
+        console.error("SERVER", addr, "->", e ? (e.message || String(e)) : "no error recorded");
+      }
+    }
+  } catch (e) { console.error("diagnostic logging failed", e); }
+  console.error(err && err.stack);
+});
 
 //For knowing that server is working or not
 app.get("/", (req, res) => {
