@@ -13,8 +13,10 @@ calibrated probabilities. Do not present them as "the model is X% sure"
 in the UI; present them as relative scores.
 
 Model file: the service loads `joblens_best_model.pkl` from this folder,
-or downloads it at startup from the MODEL_URL env var. The .pkl is a
-binary file and is NOT in this repo — see README.md for how to add it.
+or downloads it on first use from the MODEL_URL env var. The .pkl IS
+committed in this repo (ml-service/joblens_best_model.pkl, 1,158,856
+bytes) — MODEL_URL is only a fallback if the bundled file is absent.
+See README.md.
 """
 
 import os
@@ -77,7 +79,23 @@ def load_model():
         model = None
 
 
-load_model()
+_model_load_attempted = False
+
+
+def ensure_model_loaded():
+    """Load the model on first use, not at import.
+
+    Loading at import time made every cold start pay the sklearn import
+    + pickle load before any request could be served — including / and
+    /health probes. The model is now loaded on the first /predict call
+    instead; / and /health answer immediately and report
+    model_loaded: false until then.
+    """
+    global _model_load_attempted
+    if _model_load_attempted:
+        return
+    _model_load_attempted = True
+    load_model()
 
 
 class PredictRequest(BaseModel):
@@ -119,6 +137,7 @@ def health():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
+    ensure_model_loaded()
     if model is None:
         raise HTTPException(
             status_code=503,

@@ -59,6 +59,11 @@ const mapUserExperience = (userExperience) => {
   return "Unknown";
 };
 
+// Escape regex special characters so user-supplied filter values are
+// matched literally, not as regex syntax (e.g. "C++", "Node.js").
+const escapeRegExp = (value) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // New logic to calculate match score and reasons
 const calculateMatchScore = (job, user) => {
   const userSkills = user.skills || [];
@@ -183,6 +188,16 @@ async function run() {
       } catch (err) {
         res.status(403).json({ message: "Forbidden: Invalid token" });
       }
+    };
+    // Admin-only gate: same DB role check as the inline checks in
+    // DELETE /api/jobs/:id and GET /api/admin/analytics (the JWT
+    // carries only the email, so the role is read from the DB).
+    const verifyAdmin = async (req, res, next) => {
+      const user = await UsersCollection.findOne({ email: req.user.email });
+      if (!user || user.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden: Admins only" });
+      }
+      next();
     };
    // Assuming Express + MongoDB
 app.post("/api/chat", verifyToken, async (req, res) => {
@@ -623,7 +638,8 @@ Avoid unnecessary words
           sameSite: "none", //  required for cross-site cookies
           maxAge: 7 * 24 * 60 * 60 * 1000,
         });
-        res.status(200).json({ message: "Login successful", user });
+        const { password: _password, ...safeUser } = user;
+        res.status(200).json({ message: "Login successful", user: safeUser });
       } catch (err) {
         res.status(500).json({ message: "Login failed", error: err.message });
       }
@@ -712,7 +728,8 @@ Avoid unnecessary words
 
         if (!user) return res.status(404).json({ message: "User not found" });
 
-        res.status(200).json({ user });
+        const { password, ...safeUser } = user;
+        res.status(200).json({ user: safeUser });
       } catch (err) {
         res.status(401).json({ message: "Unauthorized", error: err.message });
       }
@@ -763,7 +780,8 @@ Avoid unnecessary words
           { returnDocument: "after" }
         );
 
-        res.status(200).json(result.value);
+        const { password, ...safeUser } = result.value || {};
+        res.status(200).json(safeUser);
       } catch (err) {
         console.error("Profile Update Error:", err);
         res
@@ -805,9 +823,10 @@ Avoid unnecessary words
           { returnDocument: "after" }
         );
 
+        const { password, ...safeUser } = result.value || {};
         res.status(200).json({
           message: "CV analysis saved successfully",
-          user: result.value,
+          user: safeUser,
         });
       } catch (err) {
         console.error("Save CV Analysis Error:", err);
@@ -822,7 +841,6 @@ app.post("/api/cv/generate", verifyToken, async (req, res) => {
   try {
     const user = await UsersCollection.findOne({ email: req.user.email });
     if (!user) return res.status(404).json({ message: "User not found" });
-console.log(user)
     // Build prompt for AI
     const prompt = `
 Generate a clean, professional CV layout for the following user:
@@ -846,23 +864,43 @@ Output format (JSON):
 }
 `;
 
-    const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "z-ai/glm-4.5-air:free",
-        messages: [
-          { role: "system", content: "You are a professional CV assistant." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.7,
-      }),
-    });
+    // 30s timeout, same pattern as the /api/ml/predict proxy: a slow
+    // OpenRouter response must not hang the request until the platform kills it.
+    const cvController = new AbortController();
+    const cvTimer = setTimeout(() => cvController.abort(), 30000);
+    let aiResponse;
+    try {
+      aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "z-ai/glm-4.5-air:free",
+          messages: [
+            { role: "system", content: "You are a professional CV assistant." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.7,
+        }),
+        signal: cvController.signal,
+      });
+    } catch (err) {
+      clearTimeout(cvTimer);
+      if (err.name === "AbortError") {
+        throw new Error("AI request timed out after 30s");
+      }
+      throw err;
+    }
+    clearTimeout(cvTimer);
 
-    if (!aiResponse.ok) throw new Error("AI request failed");
+    if (!aiResponse.ok) {
+      const detail = await aiResponse.text().catch(() => "");
+      throw new Error(
+        `AI request failed (OpenRouter ${aiResponse.status})${detail ? `: ${detail.slice(0, 300)}` : ""}`
+      );
+    }
     const data = await aiResponse.json();
 
     // const cvData = JSON.parse(data.choices[0].message.content);
@@ -890,7 +928,7 @@ const cvData = JSON.parse(raw);
 
     // ============================ Job Endpoints =======================================
     // ===================== Seed Jobs =====================
-    app.post("/api/jobs/seed", async (req, res) => {
+    app.post("/api/jobs/seed", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const jobs = [
           {
@@ -1161,7 +1199,7 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
     // });
 
     // ========================== Resources Endpoints ==========================
-    app.post("/api/learning/seed", async (req, res) => {
+    app.post("/api/learning/seed", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const resources = [
           {
@@ -1325,9 +1363,19 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
         const { skill, platform, cost } = req.query;
         const query = {};
 
-        if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
-        if (platform) query.platform = { $regex: new RegExp(platform, "i") };
-        if (cost) query.cost = { $regex: new RegExp(cost, "i") };
+        // "skill" may be pipe-joined ("JavaScript|Python") from the dashboard,
+        // so escape each segment and keep "|" as the alternation separator.
+        if (skill)
+          query.relatedSkills = {
+            $regex: new RegExp(
+              skill.split("|").map(escapeRegExp).join("|"),
+              "i"
+            ),
+          };
+        if (platform)
+          query.platform = { $regex: new RegExp(escapeRegExp(platform), "i") };
+        if (cost)
+          query.cost = { $regex: new RegExp(escapeRegExp(cost), "i") };
 
         const resources = await LearningResourcesCollection.find(
           query
@@ -1439,7 +1487,7 @@ ${cvText}
           });
         }
         const controller = new AbortController();
-        const timeoutMs = Number(process.env.ML_TIMEOUT_MS || 8000);
+        const timeoutMs = Number(process.env.ML_TIMEOUT_MS || 30000);
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         let response;
         try {
@@ -1477,58 +1525,8 @@ ${cvText}
           .json({ message: "ML service unreachable", error: err.message });
       }
     });
-    // DELETE a specific job
-app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Optional: check if user is admin
-    const user = await UsersCollection.findOne({ email: req.user.email });
-    if (!user || user.role !== "admin") {
-      return res.status(403).json({ message: "Forbidden: Admins only" });
-    }
-
-    const result = await JobsCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0)
-      return res.status(404).json({ message: "Job not found" });
-
-    res.status(200).json({ message: "Job deleted successfully" });
-  } catch (err) {
-    console.error("Delete Job Error:", err);
-    res.status(500).json({ message: "Failed to delete job", error: err.message });
-  }
-});
-// ===== Get All Resources =====
-app.get("/api/learning", async (req, res) => {
-  try {
-    const { skill, platform, cost } = req.query;
-    const query = {};
-
-    if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
-    if (platform) query.platform = { $regex: new RegExp(platform, "i") };
-    if (cost) query.cost = { $regex: new RegExp(cost, "i") };
-
-    const resources = await LearningResourcesCollection.find(query).toArray();
-    res.status(200).json(resources);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch resources", error: error.message });
-  }
-});
-
-// ===== Get Resource by ID =====
-app.get("/api/learning/:id", async (req, res) => {
-  try {
-    const resource = await LearningResourcesCollection.findOne({ _id: new ObjectId(req.params.id) });
-    if (!resource) return res.status(404).json({ message: "Resource not found" });
-    res.status(200).json(resource);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch resource", error: error.message });
-  }
-});
-
 // ===== Create Resource =====
-app.post("/api/learning", async (req, res) => {
+app.post("/api/learning", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const resource = req.body;
     await LearningResourcesCollection.insertOne(resource);
@@ -1539,7 +1537,7 @@ app.post("/api/learning", async (req, res) => {
 });
 
 // ===== Delete Resource =====
-app.delete("/api/learning/:id", async (req, res) => {
+app.delete("/api/learning/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await LearningResourcesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
     if (result.deletedCount === 0) return res.status(404).json({ message: "Resource not found" });
@@ -1550,7 +1548,7 @@ app.delete("/api/learning/:id", async (req, res) => {
 });
 
 // ===== Update Resource (Optional) =====
-app.patch("/api/learning/:id", async (req, res) => {
+app.patch("/api/learning/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const updates = req.body;
     const result = await LearningResourcesCollection.updateOne(
