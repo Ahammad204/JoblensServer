@@ -1,24 +1,37 @@
 """
 JobLens ML service — FastAPI wrapper around the trained CV classifier.
 
-Model: scikit-learn Pipeline (TF-IDF, 5,000 features, word 1-2 grams
--> LinearSVC), trained in JobLens_ML_Training.ipynb on the Kaggle Resume
-Dataset (2,484 CVs, 24 categories). Test scores: accuracy 0.7103,
-macro F1 0.6672.
+Model v2: scikit-learn Pipeline (TF-IDF, 10,000 features, word 1-2 grams,
+sublinear TF -> LinearSVC, C=1.0), trained in JobLens_ML_Training_v2.ipynb
+on 9,028 CVs in 18 role classes (old Kaggle set + HuggingFace CV sets +
+capped synthetic rows; tech roles split out — Python Developer, Web
+Developer, Data Science & ML, DevOps & Cloud, etc.). Test scores on
+1,324 real held-out CVs: accuracy 0.9660, macro F1 0.9459 (v1 was 0.7103 /
+0.6672 on 2,484 CVs, 24 categories). On the hardest real slice (old Kaggle
+data only) accuracy 0.83 / macro F1 0.84. A 6-CV hand-written sanity set,
+including the owner's own CV, predicts 6/6.
 
 Why LinearSVC has no probabilities: an SVM gives decision scores, not
 probabilities. This service turns the decision scores into a top-3 list
-with a softmax, and says so in every response — the numbers are NOT
-calibrated probabilities. Do not present them as "the model is X% sure"
-in the UI; present them as relative scores.
+with a temperature-scaled softmax (T=0.5 — sharpens clear wins, leaves
+genuine close calls close), and says so in every response — the numbers
+are NOT calibrated probabilities. Do not present them as "the model is
+X% sure" in the UI; present them as relative scores.
 
-Model file: the service loads `joblens_best_model.pkl` from this folder,
-or downloads it on first use from the MODEL_URL env var. The .pkl IS
-committed in this repo (ml-service/joblens_best_model.pkl, 1,158,856
-bytes) — MODEL_URL is only a fallback if the bundled file is absent.
+Model file: the v2 model ships as `joblens_best_model.pkl.b64` (base64
+text) because the GitHub connector used to push this repo cannot push
+binary files — the service decodes it in memory on first load. The old
+v1 `joblens_best_model.pkl` is still in the repo (superseded; it cannot
+be deleted through the same connector) and is used only if the .b64 is
+absent. MODEL_URL remains a fallback if neither bundled file exists.
+To replace the .b64 with the raw .pkl, delete the .b64 file and upload
+the .pkl via GitHub web upload into ml-service/ (see README.md) —
+with no .b64 present the loader uses the .pkl.
 See README.md.
 """
 
+import base64
+import io
 import os
 import re
 import urllib.request
@@ -30,9 +43,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 MODEL_FILENAME = "joblens_best_model.pkl"
+MODEL_B64_FILENAME = "joblens_best_model.pkl.b64"
 MODEL_PATH = Path(__file__).resolve().parent / MODEL_FILENAME
+MODEL_B64_PATH = Path(__file__).resolve().parent / MODEL_B64_FILENAME
 MODEL_URL = os.environ.get("MODEL_URL", "").strip()
 MAX_CV_CHARS = 20000
+# Temperature for the softmax of SVM decision scores. T=1 is the plain
+# softmax (v1's flat ~0.05 readings); T=0.5 reads clear wins clearly
+# while keeping genuinely close calls close. See the v2 training report.
+SOFTMAX_TEMPERATURE = 0.5
 
 app = FastAPI(
     title="JobLens ML Service",
@@ -55,9 +74,15 @@ def clean_text(text):
 
 
 def load_model():
-    """Load the pickle from disk, or download it once from MODEL_URL."""
+    """Load the model: v2 .b64 first, bundled .pkl next, MODEL_URL last."""
     global model, model_error
     try:
+        if MODEL_B64_PATH.exists():
+            # v2 model (base64 text — the push connector cannot carry the
+            # raw binary). Decoded in memory; nothing is written to disk.
+            raw = base64.b64decode(MODEL_B64_PATH.read_bytes())
+            model = joblib.load(io.BytesIO(raw))
+            return
         path = MODEL_PATH
         if not path.exists() and MODEL_URL:
             # Vercel functions run on a read-only filesystem except /tmp —
@@ -69,8 +94,9 @@ def load_model():
                 urllib.request.urlretrieve(MODEL_URL, path)
         if not path.exists():
             model_error = (
-                f"{MODEL_FILENAME} not found in ml-service/ and no "
-                "MODEL_URL is set. See ml-service/README.md."
+                f"Neither {MODEL_B64_FILENAME} nor {MODEL_FILENAME} found "
+                "in ml-service/ and no MODEL_URL is set. "
+                "See ml-service/README.md."
             )
             return
         model = joblib.load(path)
@@ -129,7 +155,7 @@ def health():
     return {
         "status": "ok" if model is not None else "model_missing",
         "model_loaded": model is not None,
-        "model": "Linear SVM (TF-IDF, 24 categories)" if model else None,
+        "model": "Linear SVM (TF-IDF, 18 categories)" if model else None,
         "classes": len(model.classes_) if model is not None else 0,
         "error": model_error,
     }
@@ -159,11 +185,14 @@ def predict(req: PredictRequest):
     predicted = str(model.predict([cleaned])[0])
 
     # LinearSVC has no predict_proba — use decision_function + softmax.
-    # These are relative scores, not calibrated probabilities.
+    # These are relative scores, not calibrated probabilities. The
+    # softmax is temperature-scaled (T=0.5) so clear wins read clearly
+    # while genuinely close calls stay close.
     estimator = model.named_steps["model"]
     if hasattr(estimator, "decision_function"):
         scores = np.asarray(model.decision_function([cleaned])[0], dtype=float)
-        exp_scores = np.exp(scores - scores.max())
+        scaled = (scores - scores.max()) / SOFTMAX_TEMPERATURE
+        exp_scores = np.exp(scaled)
         probs = exp_scores / exp_scores.sum()
     elif hasattr(estimator, "predict_proba"):
         probs = np.asarray(model.predict_proba([cleaned])[0], dtype=float)
@@ -188,9 +217,10 @@ def predict(req: PredictRequest):
         predicted_category=predicted,
         confidence=confidence,
         top_3=top_3,
-        model="Linear SVM (TF-IDF, 24 categories)",
+        model="Linear SVM (TF-IDF, 18 categories)",
         note=(
-            "Probabilities are a softmax of the SVM decision scores, "
-            "not calibrated probabilities — treat them as relative scores."
+            "Scores are a temperature-scaled (T=0.5) softmax of the SVM "
+            "decision scores, not calibrated probabilities — treat them "
+            "as relative scores."
         ),
     )
