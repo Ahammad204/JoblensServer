@@ -1,4 +1,4 @@
-# AI-Powered Job & Learning Recommendation Dashboard
+# Job & Learning Recommendation Dashboard
 
 ## Project Overview
 This project is a dashboard that recommends jobs and learning resources based on a user’s skills and career track. Users can register, log in, view personalized job/resource matches, track their applications, and monitor learning progress. The system provides transparent, rule-based recommendations for jobs and learning resources.
@@ -135,7 +135,7 @@ no `frontend/` folder here. 1. Clone that repo and follow its README:
 ## Folder Structure
 
 ```
-index.js            — Express server (all routes, including AI endpoints)
+index.js            — Express server (all routes, including the local ML + rule-based endpoints)
 package.json
 readme.md
 vercel.json         — Vercel deploy config for the Express server
@@ -151,12 +151,16 @@ ml-service/         — FastAPI ML service (separate Vercel project)
 
 ## Already shipped (not future work)
 
-* AI endpoints already live in `index.js`: `POST /api/chat` (career
-  chatbot), `POST /api/roadmap/generate`, `POST /api/cv/analyze`,
-  `POST /api/cv/generate`, and `POST /api/ml/predict` (trained
-  Linear-SVM classifier via `ml-service/`). Forgot/reset-password
-  routes (`POST /api/forgot-password`, `POST /api/reset-password`)
-  are also live.
+* Local ML + rule-based endpoints already live in `index.js` — no
+  outside LLM is used anywhere: `POST /api/ml/predict` (trained
+  Linear-SVM classifier via `ml-service/`), `POST /api/cv/analyze`
+  (local skill extraction + trained-model role prediction),
+  `POST /api/cv/generate` (template-based, from the user's own
+  profile), `POST /api/chat` (rule-based career assistant), and
+  `POST /api/roadmap/generate` (rule-based, from the Jobs +
+  Learning DB). Forgot/reset-password routes
+  (`POST /api/forgot-password`, `POST /api/reset-password`) are
+  also live.
 
 ## Future Enhancements
 
