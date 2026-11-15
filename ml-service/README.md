@@ -5,23 +5,26 @@ next to JobLens's rule-based matcher. It runs as a **Vercel Python
 Function** (FastAPI is served directly by Vercel's Python runtime —
 no server to keep running).
 
-- **Model v2:** scikit-learn Pipeline — TF-IDF (10,000 features, word
-  1–2 grams, sublinear TF) → Linear SVM (C=1.0). Trained in
-  `JobLens_ML_Training_v2.ipynb` on 9,028 CVs in 18 role classes: the old
-  Kaggle set (2,484) + HuggingFace CV sets (Karthikeya711 9,544,
-  Sahiti99 4,817) + capped synthetic rows (AzharAli05), deduplicated
-  across sources, with tech roles split out (Python Developer, Web
-  Developer, Data Science & ML, DevOps & Cloud, Mobile, QA, Network &
-  Security, ...). v1 was TF-IDF 5,000 features on 2,484 CVs, 24 categories.
-- **Test scores v2 (1,324 real held-out CVs):** accuracy **0.9660**,
-  macro F1 **0.9459** (v1: 0.7103 / 0.6672). Per-source: old-Kaggle slice
-  0.83 accuracy, Karthikeya/Sahiti slices ~1.00 (templated data — read
-  them as upper bounds, not real-world accuracy). A 6-CV hand-written
-  sanity set, including the owner's own CV (Python/Django), predicts 6/6.
-  Worst classes now: Chef 0.75, Healthcare 0.74, Teacher 0.78 (small,
-  real-world classes). LogReg (0.9364) and calibrated SVM (0.9373) were
-  also tried and lost on both macro F1 and the sanity set — see the v2
-  notebook.
+- **Model v3:** scikit-learn Pipeline — TF-IDF (10,000 features, word
+  1–2 grams, sublinear TF) → Linear SVM (C=2.0). Trained in
+  `JobLens_ML_Training_v3.ipynb` on 11,697 CVs in 32 role classes: v2's
+  18 plus Blockchain Developer, Game Developer, Content Writer,
+  E-commerce Specialist, IT Support, Robotics Engineer, AR/VR Developer,
+  Advocate, Aviation, Apparel, Agriculture, Automobile, BPO and
+  Consultant. Thin real classes (BPO 22, Automobile 36, Agriculture 63,
+  Apparel 97) were topped up with template-generated CVs. v2 was 9,028
+  CVs, 18 classes; v1 was 2,484 CVs, 24 categories.
+- **Test scores v3 (1,755 held-out CVs):** accuracy **0.9385**,
+  macro F1 **0.9119** (real slice 0.9242 / 0.8106; synthetic slice 1.00
+  on its own holdout — template rows are easy, read that as an upper
+  bound). Hardest real slice (old-Kaggle data only): 0.69 accuracy /
+  0.62 macro F1, down from v2's 0.83 / 0.84 — 32 classes is a harder
+  problem and the new thin classes are the weakest. A 10-CV hand-written
+  sanity set, including the owner's own CV and 4 new-role CVs, predicts
+  10/10. Worst classes now: Consultant 0.54, Healthcare 0.63, Advocate
+  0.72, Teacher 0.76, Designer 0.77. Calibrated SVM (0.9121 overall)
+  edged the plain SVM on the headline number but missed 2/10 sanity
+  CVs, so the plain SVM (C=2.0) ships — see the v3 notebook.
 - **Scores are relative, not probabilities:** the service applies a
   temperature-scaled softmax (T=0.5) to the SVM decision scores, so
   clear wins read clearly while close calls stay close. Never present
@@ -44,9 +47,9 @@ no server to keep running).
   Vercel serves the app itself.
 - `.python-version` — pins Python 3.12 (Vercel's default).
 
-## ✅ The v2 model file ships as base64 text
+## ✅ The v3 model file ships as base64 text
 
-`joblens_best_model.pkl.b64` (2.4 MB text = the 1.85 MB v2 pickle,
+`joblens_best_model.pkl.b64` (3.9 MB text = the 2.97 MB v3 pickle,
 base64-encoded) **is committed here** in `ml-service/`, and `vercel.json`
 bundles it into the function via `includeFiles`. The service decodes it
 in memory on the first `/predict` call (lazy load — see "Cold-start

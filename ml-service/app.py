@@ -1,15 +1,21 @@
 """
 JobLens ML service — FastAPI wrapper around the trained CV classifier.
 
-Model v2: scikit-learn Pipeline (TF-IDF, 10,000 features, word 1-2 grams,
-sublinear TF -> LinearSVC, C=1.0), trained in JobLens_ML_Training_v2.ipynb
-on 9,028 CVs in 18 role classes (old Kaggle set + HuggingFace CV sets +
-capped synthetic rows; tech roles split out — Python Developer, Web
-Developer, Data Science & ML, DevOps & Cloud, etc.). Test scores on
-1,324 real held-out CVs: accuracy 0.9660, macro F1 0.9459 (v1 was 0.7103 /
-0.6672 on 2,484 CVs, 24 categories). On the hardest real slice (old Kaggle
-data only) accuracy 0.83 / macro F1 0.84. A 6-CV hand-written sanity set,
-including the owner's own CV, predicts 6/6.
+Model v3: scikit-learn Pipeline (TF-IDF, 10,000 features, word 1-2 grams,
+sublinear TF -> LinearSVC, C=2.0), trained in JobLens_ML_Training_v3.ipynb
+on 11,697 CVs in 32 role classes — v2's 18 plus Blockchain Developer,
+Game Developer, Content Writer, E-commerce Specialist, IT Support,
+Robotics Engineer, AR/VR Developer, Advocate, Aviation, Apparel,
+Agriculture, Automobile, BPO and Consultant. Thin real classes (BPO,
+Automobile, Agriculture, Apparel) were topped up with template-generated
+CVs. Test scores on 1,755 held-out CVs: accuracy 0.9385, macro F1 0.9119
+(real slice 0.9242 / 0.8106; synthetic slice 1.00 on its own holdout —
+template rows are easy, read that as an upper bound). On the hardest
+real slice (old Kaggle data only) accuracy 0.69 / macro F1 0.62 — lower
+than v2's 0.83 / 0.84 because 32 classes is harder and the new thin
+classes are the weakest (Consultant 0.54, Healthcare 0.63); the 18
+original classes keep their scores. A 10-CV hand-written sanity set,
+including the owner's own CV and 4 new-role CVs, predicts 10/10.
 
 Why LinearSVC has no probabilities: an SVM gives decision scores, not
 probabilities. This service turns the decision scores into a top-3 list
@@ -18,9 +24,10 @@ genuine close calls close), and says so in every response — the numbers
 are NOT calibrated probabilities. Do not present them as "the model is
 X% sure" in the UI; present them as relative scores.
 
-Model file: the v2 model ships as `joblens_best_model.pkl.b64` (base64
-text) because the GitHub connector used to push this repo cannot push
-binary files — the service decodes it in memory on first load. The old
+Model file: the v3 model ships as `joblens_best_model.pkl.b64` (base64
+text, 3.9 MB — the 2.97 MB pickle) because the GitHub connector used to
+push this repo cannot push binary files — the service decodes it in
+memory on first load. The old
 v1 `joblens_best_model.pkl` is still in the repo (superseded; it cannot
 be deleted through the same connector) and is used only if the .b64 is
 absent. MODEL_URL remains a fallback if neither bundled file exists.
@@ -155,7 +162,7 @@ def health():
     return {
         "status": "ok" if model is not None else "model_missing",
         "model_loaded": model is not None,
-        "model": "Linear SVM (TF-IDF, 18 categories)" if model else None,
+        "model": "Linear SVM (TF-IDF, 32 categories)" if model else None,
         "classes": len(model.classes_) if model is not None else 0,
         "error": model_error,
     }
@@ -217,7 +224,7 @@ def predict(req: PredictRequest):
         predicted_category=predicted,
         confidence=confidence,
         top_3=top_3,
-        model="Linear SVM (TF-IDF, 18 categories)",
+        model="Linear SVM (TF-IDF, 32 categories)",
         note=(
             "Scores are a temperature-scaled (T=0.5) softmax of the SVM "
             "decision scores, not calibrated probabilities — treat them "
