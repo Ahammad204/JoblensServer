@@ -5,12 +5,27 @@ next to JobLens's rule-based matcher. It runs as a **Vercel Python
 Function** (FastAPI is served directly by Vercel's Python runtime —
 no server to keep running).
 
-- **Model:** scikit-learn Pipeline — TF-IDF (5,000 features, word 1–2 grams)
-  → Linear SVM. Trained in `JobLens_ML_Training.ipynb` on the Kaggle
-  Resume Dataset (2,484 CVs, 24 categories).
-- **Test scores (497 held-out CVs):** accuracy **0.7103**, macro F1
-  **0.6672**. Best categories: HR 0.88, DESIGNER 0.88,
-  INFORMATION-TECHNOLOGY 0.87. Worst: BPO 0.00 (only 4 test CVs).
+- **Model v2:** scikit-learn Pipeline — TF-IDF (10,000 features, word
+  1–2 grams, sublinear TF) → Linear SVM (C=1.0). Trained in
+  `JobLens_ML_Training_v2.ipynb` on 9,028 CVs in 18 role classes: the old
+  Kaggle set (2,484) + HuggingFace CV sets (Karthikeya711 9,544,
+  Sahiti99 4,817) + capped synthetic rows (AzharAli05), deduplicated
+  across sources, with tech roles split out (Python Developer, Web
+  Developer, Data Science & ML, DevOps & Cloud, Mobile, QA, Network &
+  Security, ...). v1 was TF-IDF 5,000 features on 2,484 CVs, 24 categories.
+- **Test scores v2 (1,324 real held-out CVs):** accuracy **0.9660**,
+  macro F1 **0.9459** (v1: 0.7103 / 0.6672). Per-source: old-Kaggle slice
+  0.83 accuracy, Karthikeya/Sahiti slices ~1.00 (templated data — read
+  them as upper bounds, not real-world accuracy). A 6-CV hand-written
+  sanity set, including the owner's own CV (Python/Django), predicts 6/6.
+  Worst classes now: Chef 0.75, Healthcare 0.74, Teacher 0.78 (small,
+  real-world classes). LogReg (0.9364) and calibrated SVM (0.9373) were
+  also tried and lost on both macro F1 and the sanity set — see the v2
+  notebook.
+- **Scores are relative, not probabilities:** the service applies a
+  temperature-scaled softmax (T=0.5) to the SVM decision scores, so
+  clear wins read clearly while close calls stay close. Never present
+  them as "the model is X% sure".
 - **API:** `GET /` (service info), `GET /health`, `POST /predict` with `{"cv_text": "..."}`
   → `{"predicted_category", "confidence", "top_3": [{category, probability}], ...}`
 
@@ -23,24 +38,35 @@ no server to keep running).
   the ASGI app, so no adapter or server process is needed.
 - `vercel.json` — rewrites every path to `/api/index` (so `/health`
   and `/predict` reach the FastAPI app), and `includeFiles` makes sure
-  `app.py` and `joblens_best_model.pkl` are bundled into the function.
+  `app.py`, `joblens_best_model.pkl` and `joblens_best_model.pkl.b64`
+  are bundled into the function.
 - `requirements.txt` — runtime dependencies only. No `uvicorn`:
   Vercel serves the app itself.
 - `.python-version` — pins Python 3.12 (Vercel's default).
 
-## ✅ The model file IS in this repo
+## ✅ The v2 model file ships as base64 text
 
-`joblens_best_model.pkl` (1,158,856 bytes ≈ 1.1 MB, binary) **is committed
-here** in `ml-service/` (added by commits `fee2c7c` and `bb3bfdf`), and
-`vercel.json` bundles it into the function via `includeFiles`. The
-service loads it on the first `/predict` call (lazy load — see
-"Cold-start caveat" below); no upload step is needed. Pick ONE of
-these two routes only if the bundled file is ever removed:
+`joblens_best_model.pkl.b64` (2.4 MB text = the 1.85 MB v2 pickle,
+base64-encoded) **is committed here** in `ml-service/`, and `vercel.json`
+bundles it into the function via `includeFiles`. The service decodes it
+in memory on the first `/predict` call (lazy load — see "Cold-start
+caveat" below); no upload step is needed.
 
-### Option A — upload the .pkl into the repo (already done)
+Why base64, not the raw `.pkl`? The GitHub connector used to push this
+repo can only push UTF-8 text files, never binaries — so the raw pickle
+cannot be pushed through it. The old v1 `joblens_best_model.pkl`
+(1,158,856 bytes, added by commits `fee2c7c` and `bb3bfdf`) is still in
+the repo, superseded: the loader uses the `.b64` (v2) whenever it is
+present and falls back to the `.pkl` (v1) only if the `.b64` is absent.
+To switch back to a raw `.pkl`, delete the `.b64` file and upload the
+raw `.pkl` in its place (GitHub web upload, Option A below) — then the
+loader uses the `.pkl`. Pick ONE of these routes only if the bundled
+files are ever removed:
+
+### Option A — upload the raw .pkl into the repo
 1. On GitHub, open this repo → `ml-service/` folder → **Add file →
    Upload files**.
-2. Upload `joblens_best_model.pkl` (the file from the Colab run).
+2. Upload `joblens_best_model.pkl` (the file from the training run).
 3. Commit to `main`. Vercel redeploys and the service loads it on the
    first `/predict` call.
 
