@@ -11,7 +11,7 @@ no server to keep running).
 - **Test scores (497 held-out CVs):** accuracy **0.7103**, macro F1
   **0.6672**. Best categories: HR 0.88, DESIGNER 0.88,
   INFORMATION-TECHNOLOGY 0.87. Worst: BPO 0.00 (only 4 test CVs).
-- **API:** `GET /health`, `POST /predict` with `{"cv_text": "..."}`
+- **API:** `GET /` (service info), `GET /health`, `POST /predict` with `{"cv_text": "..."}`
   → `{"predicted_category", "confidence", "top_3": [{category, probability}], ...}`
 
 ## How it is laid out
@@ -28,23 +28,28 @@ no server to keep running).
   Vercel serves the app itself.
 - `.python-version` — pins Python 3.12 (Vercel's default).
 
-## ⚠️ The model file is NOT in this repo
+## ✅ The model file IS in this repo
 
-`joblens_best_model.pkl` (1.1 MB, binary) cannot be pushed through the
-usual connector, so it is **not** committed here. The service refuses to
-predict until the file is present. Pick ONE of these two routes:
+`joblens_best_model.pkl` (1,158,856 bytes ≈ 1.1 MB, binary) **is committed
+here** in `ml-service/` (added by commits `fee2c7c` and `bb3bfdf`), and
+`vercel.json` bundles it into the function via `includeFiles`. The
+service loads it on the first `/predict` call (lazy load — see
+"Cold-start caveat" below); no upload step is needed. Pick ONE of
+these two routes only if the bundled file is ever removed:
 
-### Option A — upload the .pkl into the repo (recommended)
+### Option A — upload the .pkl into the repo (already done)
 1. On GitHub, open this repo → `ml-service/` folder → **Add file →
    Upload files**.
 2. Upload `joblens_best_model.pkl` (the file from the Colab run).
-3. Commit to `main`. Vercel redeploys and the service loads it at startup.
+3. Commit to `main`. Vercel redeploys and the service loads it on the
+   first `/predict` call.
 
-### Option B — host the .pkl and set MODEL_URL
+### Option B — host the .pkl and set MODEL_URL (fallback only)
 1. Put the `.pkl` somewhere with a direct download link (e.g. a GitHub
    Release asset, or any static file host).
 2. In the Vercel project (see below), set env var `MODEL_URL` to that
-   direct link. The service downloads the file once at startup.
+   direct link. The service downloads the file once on the first
+   `/predict` call.
    On Vercel the function filesystem is read-only except `/tmp`, so
    the download goes to `/tmp` — that is handled in `app.py`, you do
    not need to do anything extra.
@@ -63,12 +68,15 @@ repo, different project and Root Directory.
    `MODEL_URL` = your direct `.pkl` link. Skip this for Option A.
 5. **Deploy.**
 6. Note the project URL, e.g. `https://joblens-ml.vercel.app`.
-7. Check `GET /health` — it must say `"status": "ok"` and
-   `"model_loaded": true`. If it says `model_missing`, the `.pkl`
-   is not in place yet (see above).
+7. Check `GET /health` — it answers immediately, but on a fresh deploy
+   it says `"status": "model_missing"` until the first predict, because
+   the model loads lazily. Send one `POST /predict` first, then check
+   `/health` again — it must say `"status": "ok"` and
+   `"model_loaded": true`. If it still says `model_missing` after a
+   predict, the `.pkl` is not in place (see above).
 
 Dependency size: scikit-learn + numpy + scipy + joblib installs to
-≈200 MB in a clean install (measured 2026-11-14), under Vercel's
+~294 MB in a clean install (measured 2026-11-14), under Vercel's
 **500 MB uncompressed bundle limit for Python functions**.
 
 ## Connect the Express server
@@ -90,15 +98,20 @@ same auth as `/api/cv/analyze`) that forwards CV text to this service.
 - Vercel's free plan spins a function down after ~15 minutes idle.
   The first request after that is a **cold start**: the function boots
   Python and imports scikit-learn, which takes **a few seconds**.
+  The model itself is loaded lazily, on the first `/predict` call —
+  so `/` and `/health` answer fast even on a cold start, but the
+  **first `/predict` still pays the pickle load** on top of the boot.
   Warm requests after that are fast (< 1 s).
 - The Express route gives up after **8 seconds** (`ML_TIMEOUT_MS`,
   default 8000) and returns `502 "ML service timed out (it may be waking
   up — please retry in a few seconds)"`. That is by design: the server
   itself runs on Vercel's free tier, which kills functions after ~10 s,
   so a longer wait would not help.
-- **Before a demo or judging session, warm it up:** open
-  `https://<your-vercel-url>/health` once in a browser, wait for it to
-  answer, and the next predict call is fast.
+- **Before a demo or judging session, warm it up:** send one real
+  `POST /predict` (any short CV text) and wait for it to answer —
+  that loads the model, and the next predict call is fast. Opening
+  `/health` alone is **not** enough: it answers without loading the
+  model, so it does not warm the prediction path.
 - If a cold start ever exceeds the 10-second function limit, the first
   call fails but warms the function — just retry it once.
 

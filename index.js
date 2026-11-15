@@ -7,7 +7,6 @@ const nodemailer = require("nodemailer");
 const app = express();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 //Middleware
 app.use(
   cors({
@@ -58,6 +57,11 @@ const mapUserExperience = (userExperience) => {
   if (exp.includes("senior") || exp.includes("5+")) return "Senior";
   return "Unknown";
 };
+
+// Escape regex special characters so user-supplied filter values are
+// matched literally, not as regex syntax (e.g. "C++", "Node.js").
+const escapeRegExp = (value) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // New logic to calculate match score and reasons
 const calculateMatchScore = (job, user) => {
@@ -158,6 +162,273 @@ const calculateMatchScore = (job, user) => {
   };
 };
 
+// ============ Local-only AI: trained model + rule-based helpers ============
+// These replace every outside-LLM call. The only outside service left is
+// the team's own trained Linear-SVM classifier (ML_SERVICE_URL, served
+// by ml-service/); everything else is local, deterministic logic.
+
+// Shared ML-service call (same URL / timeout / AbortController pattern as
+// the old /api/ml/predict proxy). Throws on any failure — callers that
+// treat the prediction as optional must catch.
+const callMLService = async (cvText) => {
+  const mlServiceUrl = process.env.ML_SERVICE_URL;
+  if (!mlServiceUrl) {
+    throw new Error("ML service is not configured (set ML_SERVICE_URL).");
+  }
+  const controller = new AbortController();
+  const timeoutMs = Number(process.env.ML_TIMEOUT_MS || 30000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(
+      `${mlServiceUrl.replace(/\/$/, "")}/predict`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cv_text: cvText }),
+        signal: controller.signal,
+      }
+    );
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      const err = new Error(
+        `ML service returned ${response.status}${
+          detail ? `: ${detail.slice(0, 300)}` : ""
+        }`
+      );
+      err.mlUpstream = true;
+      err.detail = detail.slice(0, 300);
+      throw err;
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+// "INFORMATION-TECHNOLOGY" -> "Information-Technology".
+// Short acronym categories (HR, IT, BPO) keep their uppercase form.
+const titleCaseCategory = (s) => {
+  const raw = String(s || "").trim();
+  if (/^(HR|IT|BPO)$/i.test(raw)) return raw.toUpperCase();
+  return raw
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
+// Case-insensitive term match on lowercased text. Single-word terms use
+// word boundaries (so "go" never matches "google" and "java" never
+// matches "javascript"); multiword terms use a plain substring test.
+// escapeRegExp (defined above) keeps terms like "C++" literal.
+const matchTerm = (lowerText, term) => {
+  if (term.includes(" ")) return lowerText.includes(term);
+  return new RegExp(
+    `(?<![A-Za-z0-9_])${escapeRegExp(term)}(?![A-Za-z0-9_])`
+  ).test(lowerText);
+};
+
+// [display name, ...match terms]. First term defaults to the display
+// name lowercased; extra terms are aliases.
+const LOCAL_SKILLS = [
+  ["JavaScript", "javascript", "js"],
+  ["TypeScript", "typescript", "ts"],
+  ["React", "react", "react.js", "reactjs"],
+  ["Node.js", "node.js", "nodejs", "node js"],
+  ["Express", "express", "express.js"],
+  ["MongoDB", "mongodb", "mongo"],
+  ["MySQL", "mysql"],
+  ["PostgreSQL", "postgresql", "postgres"],
+  ["Python", "python"],
+  ["Django", "django"],
+  ["Flask", "flask"],
+  ["Java", "java"],
+  ["Spring", "spring", "spring boot"],
+  ["C++", "c++"],
+  ["C#", "c#", "c sharp"],
+  ["C", "c programming", "c language"],
+  ["Go", "golang", "go programming"],
+  ["PHP", "php"],
+  ["Laravel", "laravel"],
+  ["HTML", "html", "html5"],
+  ["CSS", "css", "css3"],
+  ["Tailwind CSS", "tailwind", "tailwind css"],
+  ["Bootstrap", "bootstrap"],
+  ["Next.js", "next.js", "nextjs"],
+  ["Vue.js", "vue", "vue.js"],
+  ["Angular", "angular"],
+  ["Docker", "docker"],
+  ["Kubernetes", "kubernetes", "k8s"],
+  ["AWS", "aws", "amazon web services"],
+  ["Firebase", "firebase"],
+  ["Figma", "figma"],
+  ["Postman", "postman"],
+  ["Git", "git"],
+  ["GitHub", "github"],
+  ["Redux", "redux"],
+  ["GraphQL", "graphql"],
+  ["REST API", "rest api", "restful"],
+  ["SQL", "sql"],
+  ["Linux", "linux"],
+  ["Machine Learning", "machine learning", "ml"],
+  ["Deep Learning", "deep learning"],
+  ["NLP", "nlp", "natural language processing"],
+  ["Computer Vision", "computer vision"],
+  ["Data Analysis", "data analysis", "data analytics"],
+  ["Excel", "excel", "ms excel"],
+  ["WordPress", "wordpress"],
+  ["Adobe XD", "adobe xd", "xd"],
+  ["UI/UX Design", "ui/ux", "ui design", "ux design"],
+  ["SEO", "seo"],
+  ["Digital Marketing", "digital marketing"],
+  ["Content Writing", "content writing"],
+  ["Video Editing", "video editing"],
+  ["Networking", "networking", "computer networks"],
+  ["Cybersecurity", "cybersecurity", "cyber security"],
+  ["Arduino", "arduino"],
+  ["IoT", "iot", "internet of things"],
+  ["Raspberry Pi", "raspberry pi"],
+  ["MATLAB", "matlab"],
+  ["AutoCAD", "autocad"],
+  ["Flutter", "flutter"],
+  ["React Native", "react native"],
+  ["Android", "android"],
+  ["iOS", "ios"],
+  ["Kotlin", "kotlin"],
+  ["Swift", "swift"],
+  ["Data Structures", "data structures"],
+  ["Algorithms", "algorithms", "algorithm"],
+  ["OOP", "oop", "object-oriented programming"],
+  ["Communication", "communication"],
+  ["Leadership", "leadership"],
+  ["Problem Solving", "problem solving", "problem-solving"],
+  ["Teamwork", "teamwork", "team work"],
+  ["Time Management", "time management"],
+];
+
+const LOCAL_TOOLS = [
+  ["Git", "git"],
+  ["GitHub", "github"],
+  ["VS Code", "visual studio code", "vs code"],
+  ["Docker", "docker"],
+  ["Postman", "postman"],
+  ["Figma", "figma"],
+  ["Jira", "jira"],
+  ["Slack", "slack"],
+  ["Trello", "trello"],
+  ["Notion", "notion"],
+  ["Chrome DevTools", "chrome devtools", "devtools"],
+  ["MySQL Workbench", "mysql workbench"],
+  ["MongoDB Compass", "mongodb compass"],
+  ["Photoshop", "photoshop"],
+  ["Illustrator", "illustrator"],
+  ["Canva", "canva"],
+  ["Tableau", "tableau"],
+  ["Power BI", "power bi"],
+  ["Jupyter Notebook", "jupyter"],
+  ["PyCharm", "pycharm"],
+  ["IntelliJ IDEA", "intellij"],
+  ["Android Studio", "android studio"],
+  ["Xcode", "xcode"],
+  ["Vercel", "vercel"],
+  ["Netlify", "netlify"],
+  ["Heroku", "heroku"],
+  ["Google Cloud", "google cloud", "gcp"],
+  ["npm", "npm"],
+  ["Yarn", "yarn"],
+  ["Jest", "jest"],
+  ["Selenium", "selenium"],
+  ["Microsoft Word", "microsoft word", "ms word"],
+  ["PowerPoint", "powerpoint", "ms powerpoint"],
+];
+
+const LOCAL_ROLES = [
+  ["Frontend Developer", "frontend", "front-end", "front end"],
+  ["Backend Developer", "backend", "back-end", "back end"],
+  ["Full Stack Developer", "full stack", "full-stack"],
+  ["Web Developer", "web developer", "web development"],
+  ["Software Engineer", "software engineer", "software developer", "software development"],
+  ["Mobile Developer", "mobile developer", "mobile app", "android developer", "ios developer"],
+  ["Data Scientist", "data scientist", "data science"],
+  ["Data Analyst", "data analyst", "data analysis"],
+  ["Machine Learning Engineer", "machine learning engineer", "ml engineer"],
+  ["DevOps Engineer", "devops"],
+  ["UI/UX Designer", "ui/ux designer", "ux designer", "ui designer"],
+  ["Graphic Designer", "graphic designer", "graphic design"],
+  ["QA Engineer", "qa engineer", "quality assurance", "software tester", "qa tester"],
+  ["Database Administrator", "database administrator", "dba"],
+  ["Network Engineer", "network engineer"],
+  ["Cybersecurity Analyst", "cybersecurity analyst", "cyber security analyst", "security analyst", "penetration tester"],
+  ["Project Manager", "project manager"],
+  ["Business Analyst", "business analyst"],
+  ["Digital Marketer", "digital marketer", "digital marketing"],
+  ["Accountant", "accountant", "accounting"],
+  ["Content Writer", "content writer"],
+  ["HR", "human resource", "human resources", "hr manager"],
+];
+
+// Local skill/tool/role extraction from free CV text. Keyword roles only —
+// the trained-model role is added by callers that have a prediction.
+const extractLocal = (cvText) => {
+  const lower = String(cvText || "").toLowerCase();
+  const pick = (dict) => {
+    const found = [];
+    for (const [name, ...terms] of dict) {
+      const allTerms = terms.length > 0 ? terms : [name.toLowerCase()];
+      if (allTerms.some((t) => matchTerm(lower, t))) found.push(name);
+    }
+    return found;
+  };
+  return {
+    skills: pick(LOCAL_SKILLS),
+    tools: pick(LOCAL_TOOLS),
+    roles: pick(LOCAL_ROLES),
+  };
+};
+
+// Total years of experience parsed from CV text. Sums year ranges
+// ("2021 - Present" counts to 2026, the current year) and falls back to
+// the largest "N years experience" mention. Never invented: 0 if nothing
+// is stated.
+const parseExperienceYears = (text) => {
+  const t = String(text || "");
+  let rangeYears = 0;
+  const rangeRe = /((?:19|20)\d{2})\s*[–—-]\s*((?:19|20)\d{2}|present|current|now)/gi;
+  let m;
+  while ((m = rangeRe.exec(t)) !== null) {
+    const start = parseInt(m[1], 10);
+    const end = /^\d+$/.test(m[2]) ? Math.min(parseInt(m[2], 10), 2026) : 2026;
+    if (end > start) rangeYears += end - start;
+  }
+  let statedYears = 0;
+  const yearsRe = /(\d+)\+?\s*years?(?:\s+of)?\s+(?:experience|exp)\b/gi;
+  while ((m = yearsRe.exec(t)) !== null) {
+    statedYears = Math.max(statedYears, parseInt(m[1], 10));
+  }
+  return Math.min(Math.max(rangeYears, statedYears), 40);
+};
+
+// Education lines from CV text: lines that name a degree / level / field.
+const parseEducation = (text) => {
+  const keywords = [
+    "bsc", "b.sc", "bachelor", "master", "m.sc", "msc", "mba", "bba",
+    "diploma", "hsc", "ssc", "computer science", "cse", "phd",
+  ];
+  const found = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim().replace(/^[-•*]\s*/, "");
+    if (!trimmed || trimmed.length > 160) continue;
+    if (
+      keywords.some((k) => trimmed.toLowerCase().includes(k)) &&
+      !found.includes(trimmed)
+    ) {
+      found.push(trimmed);
+    }
+    if (found.length >= 5) break;
+  }
+  return found;
+};
+
+
 async function run() {
   try {
     // NOTE: no explicit client.connect() / ping here on purpose — the driver
@@ -184,11 +455,20 @@ async function run() {
         res.status(403).json({ message: "Forbidden: Invalid token" });
       }
     };
+    // Admin-only gate: same DB role check as the inline checks in
+    // DELETE /api/jobs/:id and GET /api/admin/analytics (the JWT
+    // carries only the email, so the role is read from the DB).
+    const verifyAdmin = async (req, res, next) => {
+      const user = await UsersCollection.findOne({ email: req.user.email });
+      if (!user || user.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden: Admins only" });
+      }
+      next();
+    };
    // Assuming Express + MongoDB
 app.post("/api/chat", verifyToken, async (req, res) => {
   try {
     const { message } = req.body;
-    console.log(req.user);
 
     const userEmail = req.user.email;
 
@@ -196,94 +476,204 @@ app.post("/api/chat", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
-    // Fetch user from DB by email
+    // Fetch user from DB by email (profile + stored ML prediction + roadmap)
     const user = await UsersCollection.findOne(
       { email: userEmail },
-      { projection: { name: 1, skills: 1, resume: 1, email: 1, role: 1 } }
+      { projection: { name: 1, skills: 1, resume: 1, email: 1, role: 1, mlPrediction: 1, careerTrack: 1, education: 1, experience: 1, roadmap: 1 } }
     );
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Build dynamic system prompt with full user info
-    const systemPrompt = `
-You are a concise, efficient, and professional career assistant.
+    // Rule-based career assistant: answers ONLY from the user's stored
+    // profile, their stored ML prediction, and the Jobs/Learning DB.
+    // Replies are PLAIN TEXT (no markdown) — the clients render raw text.
+    const text = String(message).toLowerCase();
+    const name = user.name || "there";
+    const userSkills = Array.isArray(user.skills) ? user.skills : [];
+    const userSkillsLower = userSkills.map((s) => String(s).toLowerCase());
+    const skillList =
+      userSkills.length > 0 ? userSkills.join(", ") : "No skills listed yet";
 
-Response Rules:
+    const helpText =
+      "Here is what I can do:\n" +
+      "- Find jobs that match your skills — ask \"What jobs fit me?\"\n" +
+      "- Suggest learning resources for skills you are missing — ask \"What should I learn?\"\n" +
+      "- Summarize your roadmap — ask \"Show my roadmap\"\n" +
+      "- Show your profile and ML prediction — ask \"What is my prediction?\"\n" +
+      "- Give CV advice — ask \"How is my CV?\"";
 
-Always answer in short, clean bullet points.
+    let reply;
 
-Keep responses minimal, aligned, and professional.
-
-No long paragraphs, essays, or unnecessary fluff.
-
-Format clearly:
-
-Section headings in bold
-
-Short bullets (3–6 per section)
-
-Provide actionable, prioritized guidance.
-
-Only include necessary information.
-
-User Context (always reference):
-
-Name: ${user.name || "Not provided"}
-
-Email: ${user.email}
-
-Role: ${user.role || "Not provided"}
-
-Skills: ${Array.isArray(user.skills) ? user.skills.join(", ") : "No skills listed"}
-
-Resume Summary: ${user.resume || "No resume provided"}
-
-Responsibilities:
-
-Give personalized career guidance strictly based on the user’s role, skills, and resume.
-
-Suggest actionable steps for learning, career growth, and role alignment.
-
-If needed, ask a short, direct follow-up question to clarify context.
-
-Tone & Style:
-
-Professional, tight, and clear
-
-Direct and to the point
-
-Structured with headings and bullets
-
-Avoid unnecessary words
-`;
-
-    // Send request to LLM
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "z-ai/glm-4.5-air:free",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: message }
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      return res.status(500).json({ error: "AI request failed" });
+    if (/\b(hi|hello|hey|salam|assalamu alaikum|good morning|good afternoon|good evening)\b/.test(text)) {
+      reply =
+        `Hi ${name}! I can help you find jobs that match your skills, ` +
+        `suggest learning resources for your skill gaps, summarize your ` +
+        `roadmap, or show your profile and ML prediction. What would you like to do?`;
+    } else if (
+      text.includes("help") ||
+      text.includes("what can you do") ||
+      text.includes("how do i") ||
+      text.includes("how to")
+    ) {
+      reply = helpText;
+    } else if (
+      text.includes("job") ||
+      text.includes("recommend") ||
+      text.includes("match") ||
+      text.includes("fit")
+    ) {
+      // Top 3 jobs by skill overlap: matched / job skills.
+      if (userSkills.length === 0) {
+        reply =
+          "You have no skills listed in your profile yet. Add your skills " +
+          "on the profile page first, then ask me again and I will match jobs for you.";
+      } else {
+        const allJobs = await JobsCollection.find().toArray();
+        const scored = allJobs
+          .map((job) => {
+            const jobSkills = Array.isArray(job.skills) ? job.skills : [];
+            const matched = jobSkills.filter((skill) =>
+              userSkillsLower.includes(String(skill).toLowerCase())
+            );
+            const missing = jobSkills.filter(
+              (skill) => !userSkillsLower.includes(String(skill).toLowerCase())
+            );
+            const pct =
+              jobSkills.length > 0
+                ? Math.round((matched.length / jobSkills.length) * 100)
+                : 0;
+            return { job, matched, missing, pct };
+          })
+          .filter((s) => s.pct > 0)
+          .sort((a, b) => b.pct - a.pct)
+          .slice(0, 3);
+        if (scored.length === 0) {
+          reply =
+            "No jobs in the database match your current skills yet. Try " +
+            "adding more skills to your profile, or check the Jobs page for the full list.";
+        } else {
+          const lines = scored.map((s, i) => {
+            const matchedText =
+              s.matched.length > 0 ? `Matches: ${s.matched.join(", ")}` : "No skill matches";
+            const missingText =
+              s.missing.length > 0
+                ? `Missing: ${s.missing.join(", ")}`
+                : "No skills missing";
+            return `${i + 1}. ${s.job.title} at ${s.job.company || "Unknown"} — ${s.pct}% skill match (${matchedText}; ${missingText})`;
+          });
+          reply = `Top jobs for you:\n${lines.join("\n")}`;
+        }
+      }
+    } else if (
+      text.includes("learn") ||
+      text.includes("skill gap") ||
+      text.includes("course") ||
+      text.includes("resource") ||
+      text.includes("study")
+    ) {
+      // Missing skills: most frequent job skills the user does not have.
+      // If no gap is known, fall back to the user's own skills.
+      const allJobs = await JobsCollection.find().toArray();
+      const missingCount = {};
+      for (const job of allJobs) {
+        for (const skill of job.skills || []) {
+          if (!userSkillsLower.includes(String(skill).toLowerCase())) {
+            missingCount[skill] = (missingCount[skill] || 0) + 1;
+          }
+        }
+      }
+      let targetSkills = Object.entries(missingCount)
+        .sort((a, b) => b[1] - a[1])
+        .map(([skill]) => skill)
+        .slice(0, 10);
+      if (targetSkills.length === 0) targetSkills = userSkills;
+      if (targetSkills.length === 0) {
+        reply =
+          "You have no skills listed in your profile yet, so I cannot tell " +
+          "what you are missing. Add your skills on the profile page first.";
+      } else {
+        const targetLower = targetSkills.map((s) => String(s).toLowerCase());
+        const allResources = await LearningResourcesCollection.find().toArray();
+        const scored = allResources
+          .map((resource) => {
+            const covers = (resource.relatedSkills || []).filter((skill) =>
+              targetLower.includes(String(skill).toLowerCase())
+            );
+            return { resource, covers };
+          })
+          .filter((s) => s.covers.length > 0)
+          .sort((a, b) => b.covers.length - a.covers.length)
+          .slice(0, 5);
+        if (scored.length === 0) {
+          reply =
+            `I could not find learning resources for ${targetSkills.slice(0, 3).join(", ")} ` +
+            `in the database yet. Check the Learning Resources page for the full list.`;
+        } else {
+          const lines = scored.map((s, i) => {
+            return `${i + 1}. ${s.resource.title} (${s.resource.platform || "Learning Resources"}) — Covers: ${s.covers.join(", ")}`;
+          });
+          reply =
+            `Learning resources for your missing skills (${targetSkills.slice(0, 5).join(", ")}):\n${lines.join("\n")}`;
+        }
+      }
+    } else if (text.includes("roadmap")) {
+      const roadmap = user.roadmap;
+      if (roadmap && roadmap.targetRole) {
+        const phaseNames = Array.isArray(roadmap.phases)
+          ? roadmap.phases.map((p) => p.phaseName).filter(Boolean)
+          : [];
+        reply =
+          `Your roadmap: ${roadmap.targetRole}, timeframe ${roadmap.timeframe || "not set"}.` +
+          (phaseNames.length > 0 ? ` Phases: ${phaseNames.join("; ")}.` : "") +
+          ` Open the Roadmap page on your dashboard to see the full plan.`;
+      } else {
+        reply =
+          "You do not have a roadmap yet. Generate one from the Roadmap " +
+          "page on your dashboard by choosing a target role and timeframe.";
+      }
+    } else if (
+      text.includes("profile") ||
+      text.includes("who am i") ||
+      text.includes("my skills") ||
+      text.includes("my prediction") ||
+      text.includes("prediction")
+    ) {
+      const pred = user.mlPrediction;
+      const category =
+        (pred && pred.predicted_category) ||
+        (pred && pred.data && pred.data.predicted_category) ||
+        (typeof pred === "string" ? pred : null);
+      const predictionText = category
+        ? `Your last ML prediction: ${titleCaseCategory(category)}.`
+        : "No ML prediction yet — upload your CV on the CV Analysis page and I can predict a role for you.";
+      reply =
+        `Your profile:\n` +
+        `Name: ${user.name || "Not provided"}\n` +
+        `Email: ${user.email}\n` +
+        `Career track: ${user.careerTrack || "Not set"}\n` +
+        `Skills: ${skillList}\n` +
+        `Education: ${user.education || "Not provided"}\n` +
+        `${predictionText}`;
+    } else if (text.includes("resume") || text.includes("cv")) {
+      if (user.resume) {
+        reply =
+          `You have a CV saved on your profile. It lists ${userSkills.length} skill(s). ` +
+          `Upload it again on the CV Analysis page any time to refresh your skills and ML ` +
+          `prediction, and use the CV Generator to build a clean CV from your profile.`;
+      } else {
+        reply =
+          "You have no CV saved yet. Add your CV text on the CV Analysis " +
+          "page so I can extract your skills and predict a matching role.";
+      }
+    } else {
+      reply =
+        "I can help with jobs, learning resources, your roadmap, your " +
+        "profile and ML prediction, or CV advice. For example, ask: \"What jobs fit me?\"";
     }
 
-    const data = await response.json();
-    const reply = data.choices[0].message.content;
-
     res.status(200).json({ reply });
-
   } catch (err) {
     console.error("Chat Error:", err);
     res.status(500).json({ error: err.message });
@@ -407,102 +797,123 @@ Avoid unnecessary words
         const { targetRole, timeframe, learningTime, currentSkills } = req.body;
         const user = await UsersCollection.findOne({ email: req.user.email });
 
-        console.log(req.user.email);
-
         if (!user) return res.status(404).json({ message: "User not found" });
 
-        // VITAL: Re-define systemPrompt and userPrompt here.
-        const systemPrompt = `You are a highly specialized Career Coach and AI Mentor. Your task is to generate a personalized career development roadmap. The roadmap must be a clear, actionable, step-by-step plan grouped by phases (Weeks/Months) for the user to achieve their target role.
-        
-        Roadmap Output Requirements (MUST be in JSON format):
-        {
-          "title": "Roadmap to [Target Role]",
-          "targetRole": "[The target role]",
-          "currentSkills": "[The list of current skills]",
-          "timeframe": "[The selected timeframe]",
-          "learningTime": "[User's available learning time]",
-          "applicationTime": "[A suggested point (e.g., 'End of Month 3') when the user should start applying for jobs/internships.]",
-          "phases": [
-            {
-              "phaseName": "Phase 1: Foundations (Month 1)",
-              "goal": "Build a strong foundation in core technologies.",
-              "steps": [
-                {"topic": "Specific Topic/Technology to learn", "details": "Key concepts to master.", "projectIdea": "Simple project idea related to this topic."},
-                // ... more steps
-              ]
-            },
-            // ... more phases
-          ]
-        }
-        
-        The 'phases' array should cover the full timeframe. Ensure the topics/technologies are **SPECIFIC** and the project ideas are **SIMPLE** (e.g., a "To-Do App" is too generic; specify features like "A Trello-style board using React and D&D API"). The output must be valid, stringified JSON only.`;
+        // Rule-based roadmap: needed skills come from Jobs whose title
+        // matches the target role, most frequent first. Guard currentSkills
+        // — the client sends user.skills, but it may be absent.
+        const current = Array.isArray(currentSkills) ? currentSkills : [];
+        const currentLower = current.map((s) => String(s).toLowerCase());
 
-        const userPrompt = `
-            Generate a roadmap based on the following:
-            - Target Role: ${targetRole}
-            - Timeframe: ${timeframe}
-            - Available Learning Time: ${
-              learningTime || "Not specified. Assume 10 hours/week."
+        const countSkills = (jobs) => {
+          const counts = {};
+          for (const job of jobs) {
+            for (const skill of job.skills || []) {
+              if (!currentLower.includes(String(skill).toLowerCase())) {
+                counts[skill] = (counts[skill] || 0) + 1;
+              }
             }
-            - Current Skills (from profile/CV): ${
-              currentSkills.join(", ") ||
-              "None provided. Focus on foundational skills for the target role."
-            }
-        `;
-        // End of prompt definitions
-
-        const response = await fetch(
-          "https://openrouter.ai/api/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "openai/gpt-oss-120b",
-              messages: [
-                { role: "system", content: systemPrompt }, // Now correctly scoped
-                { role: "user", content: userPrompt }, // Now correctly scoped
-              ],
-              temperature: 0.7,
-            }),
           }
+          return Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([skill]) => skill);
+        };
+
+        const matchingJobs = await JobsCollection.find({
+          title: {
+            $regex: escapeRegExp(String(targetRole || "")),
+            $options: "i",
+          },
+        }).toArray();
+        let neededSkills = countSkills(matchingJobs).slice(0, 8);
+        if (neededSkills.length === 0) {
+          // No job matches the role — fall back to the most common job
+          // skills overall so the roadmap is never empty.
+          const allJobs = await JobsCollection.find().toArray();
+          neededSkills = countSkills(allJobs).slice(0, 8);
+        }
+
+        // Up to 2 learning resources per needed skill.
+        const resourceBySkill = {};
+        for (const skill of neededSkills) {
+          const resources = await LearningResourcesCollection.find({
+            relatedSkills: { $regex: escapeRegExp(skill), $options: "i" },
+          })
+            .limit(2)
+            .toArray();
+          resourceBySkill[skill] = resources;
+        }
+
+        const monthsMatch = String(timeframe || "").match(/(\d+)/);
+        const months = monthsMatch ? parseInt(monthsMatch[1], 10) : 3;
+        // A 1-month timeframe is planned week by week.
+        const unit = months === 1 ? "Week" : "Month";
+
+        const stepFor = (skill) => {
+          const resource = (resourceBySkill[skill] || [])[0];
+          return {
+            topic: skill,
+            details: resource
+              ? `Learn ${skill} with '${resource.title}' (${resource.platform || "Learning Resources"})`
+              : `Find a course for ${skill} on the Learning Resources page`,
+            projectIdea: `Build a small ${skill} demo project and add it to your CV`,
+          };
+        };
+        const fallbackStep = (label) => ({
+          topic: `Learn the fundamentals of ${targetRole || "your target role"}`,
+          details: `Study the core concepts behind ${targetRole || "your target role"} from the Learning Resources page.`,
+          projectIdea: `Build a small ${targetRole || "target-role"} demo project and add it to your CV`,
+        });
+
+        const perPhase = Math.ceil(neededSkills.length / 3) || 1;
+        const phaseSkills = [0, 1, 2].map((i) =>
+          neededSkills.slice(i * perPhase, (i + 1) * perPhase)
         );
+        const stepsFor = (group, label) =>
+          group.length > 0 ? group.map(stepFor) : [fallbackStep(label)];
 
-        // ... (The rest of the logic, including response checks, JSON parsing, and saving to MongoDB, should follow here) ...
+        // Phase 3 always ends with an application step.
+        const phase3Steps = stepsFor(phaseSkills[2], "Phase 3");
+        phase3Steps.push({
+          topic: "Apply for roles",
+          details: `Start applying for ${targetRole || "target"} roles and tailor your CV to each job.`,
+          projectIdea: "Track every application on your dashboard.",
+        });
 
-        // 1. Check for failed HTTP response from OpenRouter
-        if (!response.ok) {
-          const errorBody = await response
-            .json()
-            .catch(() => ({ message: "Failed to parse API error response." }));
-          console.error("OpenRouter API Error:", response.status, errorBody);
-          throw new Error(
-            `AI generation failed with status ${response.status}.`
-          );
-        }
+        const newRoadmap = {
+          title: `Roadmap to ${targetRole}`,
+          targetRole: targetRole,
+          currentSkills: current,
+          timeframe: timeframe,
+          learningTime: learningTime,
+          applicationTime:
+            months === 1 ? "End of Week 3" : `End of Month ${months}`,
+          phases: [
+            {
+              phaseName: `Phase 1: Foundations (${unit} 1)`,
+              goal: `Build a strong foundation in the core technologies for ${targetRole}.`,
+              steps: stepsFor(phaseSkills[0], "Phase 1"),
+            },
+            {
+              phaseName: `Phase 2: Core Skills (${unit} 2)`,
+              goal: `Go deeper into the core skills for ${targetRole} and build working knowledge.`,
+              steps: stepsFor(phaseSkills[1], "Phase 2"),
+            },
+            {
+              phaseName: `Phase 3: Projects & Applications (${unit} 3)`,
+              goal: `Prove the skills with projects and start applying for ${targetRole} roles.`,
+              steps: phase3Steps,
+            },
+          ],
+        };
 
-        // 2. Parse the AI response and clean the JSON string
-        const aiResponse = await response.json();
-        let jsonString = aiResponse.choices[0].message.content.trim();
-
-        // Remove Markdown code fences (```json ... ```) if the model added them
-        if (jsonString.startsWith("```json")) {
-          jsonString = jsonString
-            .substring(7, jsonString.lastIndexOf("```"))
-            .trim();
-        }
-
-        const newRoadmap = JSON.parse(jsonString); // Parse the final JSON object
-
-        // 3. Save the roadmap to the user's profile
+        // Save the roadmap to the user's profile
         await UsersCollection.updateOne(
           { email: req.user.email },
           { $set: { roadmap: newRoadmap } }
         );
 
-        // 4. Send success response back to the client
+        // Send success response back to the client
         res.status(200).json(newRoadmap);
       } catch (err) {
         console.error("Failed to generate and save roadmap:", err);
@@ -623,7 +1034,8 @@ Avoid unnecessary words
           sameSite: "none", //  required for cross-site cookies
           maxAge: 7 * 24 * 60 * 60 * 1000,
         });
-        res.status(200).json({ message: "Login successful", user });
+        const { password: _password, ...safeUser } = user;
+        res.status(200).json({ message: "Login successful", user: safeUser });
       } catch (err) {
         res.status(500).json({ message: "Login failed", error: err.message });
       }
@@ -712,7 +1124,8 @@ Avoid unnecessary words
 
         if (!user) return res.status(404).json({ message: "User not found" });
 
-        res.status(200).json({ user });
+        const { password, ...safeUser } = user;
+        res.status(200).json({ user: safeUser });
       } catch (err) {
         res.status(401).json({ message: "Unauthorized", error: err.message });
       }
@@ -763,7 +1176,8 @@ Avoid unnecessary words
           { returnDocument: "after" }
         );
 
-        res.status(200).json(result.value);
+        const { password, ...safeUser } = result.value || {};
+        res.status(200).json(safeUser);
       } catch (err) {
         console.error("Profile Update Error:", err);
         res
@@ -805,9 +1219,10 @@ Avoid unnecessary words
           { returnDocument: "after" }
         );
 
+        const { password, ...safeUser } = result.value || {};
         res.status(200).json({
           message: "CV analysis saved successfully",
-          user: result.value,
+          user: safeUser,
         });
       } catch (err) {
         console.error("Save CV Analysis Error:", err);
@@ -822,59 +1237,123 @@ app.post("/api/cv/generate", verifyToken, async (req, res) => {
   try {
     const user = await UsersCollection.findOne({ email: req.user.email });
     if (!user) return res.status(404).json({ message: "User not found" });
-console.log(user)
-    // Build prompt for AI
-    const prompt = `
-Generate a clean, professional CV layout for the following user:
-Name: ${user.name}
-Email: ${user.email}
-Education: ${user.education || "N/A"}
-Experience: ${user.experience || "N/A"}
-Skills: ${user.skills?.join(", ") || "N/A"}
-Tools: ${user.tools?.join(", ") || "N/A"}
-Career Track: ${user.careerTrack || "N/A"}
 
-Output format (JSON):
-{
-  "personalInfo": { "name": "...", "email": "...", "education": "..." },
-  "professionalSummary": "...",
-  "experience": [ { "role": "...", "company": "...", "duration": "...", "description": ["..."] } ],
-  "projects": [ { "title": "...", "description": ["..."] } ],
-  "skills": [ "..."],
-  "tools": [ "..."],
-  "recommendations": [ "...LinkedIn / portfolio tips..." ]
-}
-`;
+    // Template-based CV built ONLY from the user's stored profile/resume.
+    // Nothing is invented: no company, year count, or project is made up.
+    const resumeText = user.resume || "";
+    const extracted = extractLocal(resumeText);
+    const skills =
+      Array.isArray(user.skills) && user.skills.length > 0
+        ? user.skills
+        : extracted.skills;
+    const tools =
+      Array.isArray(user.tools) && user.tools.length > 0
+        ? user.tools
+        : extracted.tools;
 
-    const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
+    // Predicted role from the team's own trained model (non-fatal).
+    let predictedRole = null;
+    if (resumeText) {
+      try {
+        const prediction = await callMLService(resumeText);
+        if (prediction && prediction.predicted_category) {
+          predictedRole = titleCaseCategory(prediction.predicted_category);
+        }
+      } catch (err) {
+        console.error("CV Generate: ML prediction unavailable:", err.message);
+      }
+    }
+    const role = predictedRole || user.careerTrack || "professional";
+    const years = parseExperienceYears(resumeText || user.experience || "");
+    const educationLines = parseEducation(resumeText);
+    const educationText =
+      user.education || (educationLines.length > 0 ? educationLines[0] : "");
+
+    // Professional summary — only real data.
+    const topSkills = skills.slice(0, 5);
+    let professionalSummary = `${user.name || "Candidate"} is a ${role}`;
+    if (topSkills.length > 0) {
+      professionalSummary += ` skilled in ${topSkills.join(", ")}`;
+    }
+    if (years > 0) {
+      professionalSummary += ` with ${years} year${years === 1 ? "" : "s"} of experience`;
+    }
+    if (educationText) {
+      professionalSummary += `. Education: ${educationText}`;
+    }
+    professionalSummary += ".";
+
+    // Conservative experience parser: only a line that names a role, a
+    // company (via "at" / "@"), and a year range becomes an entry.
+    const experience = [];
+    for (const rawLine of resumeText.split(/\r?\n/)) {
+      const line = rawLine.trim().replace(/^[-•*]\s*/, "");
+      const m = line.match(
+        /^(.+?)\s+(?:at|@)\s+(.+?)\s+((?:19|20)\d{2}\s*[–—-]\s*(?:(?:19|20)\d{2}|Present|Current|Now))\s*$/i
+      );
+      if (m) {
+        const used = extracted.skills.filter((s) =>
+          line.toLowerCase().includes(s.toLowerCase())
+        );
+        experience.push({
+          role: m[1].trim(),
+          company: m[2].trim(),
+          duration: m[3].trim(),
+          description:
+            used.length > 0 ? [`Skills used: ${used.join(", ")}`] : [],
+        });
+      }
+      if (experience.length >= 5) break;
+    }
+
+    // Projects: only from an explicit "Projects" section in the resume.
+    const projects = [];
+    const lines = resumeText.split(/\r?\n/);
+    let inProjects = false;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (/^projects?\s*:?\s*$/i.test(line)) {
+        inProjects = true;
+        continue;
+      }
+      if (inProjects) {
+        if (/^(education|experience|skills|certifications?|contact|summary|awards?)\b/i.test(line)) {
+          break;
+        }
+        const bullet = line.replace(/^[-•*]\s*/, "");
+        if (bullet.length > 10) {
+          projects.push({ title: bullet.slice(0, 60), description: [bullet] });
+        }
+        if (projects.length >= 5) break;
+      }
+    }
+
+    // Recommendations: generic honest tips, plus one ML-role tip when a
+    // prediction exists.
+    const recommendations = [
+      "Add a portfolio link to showcase your best work.",
+      "List your top 3 projects with measurable outcomes.",
+    ];
+    if (predictedRole) {
+      recommendations.push(
+        `Target ${predictedRole} roles — your CV matches this category.`
+      );
+    }
+
+    const cvData = {
+      personalInfo: {
+        name: user.name,
+        email: user.email,
+        education: user.education || "",
       },
-      body: JSON.stringify({
-        model: "z-ai/glm-4.5-air:free",
-        messages: [
-          { role: "system", content: "You are a professional CV assistant." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.7,
-      }),
-    });
+      professionalSummary,
+      experience,
+      projects,
+      skills,
+      tools,
+      recommendations,
+    };
 
-    if (!aiResponse.ok) throw new Error("AI request failed");
-    const data = await aiResponse.json();
-
-    // const cvData = JSON.parse(data.choices[0].message.content);
-    let raw = data.choices[0].message.content.trim();
-
-// Remove code fences if present
-raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
-
-// Now parse clean JSON
-const cvData = JSON.parse(raw);
-
-    
     // Save CV data to user profile
     await UsersCollection.updateOne(
       { email: req.user.email },
@@ -890,7 +1369,7 @@ const cvData = JSON.parse(raw);
 
     // ============================ Job Endpoints =======================================
     // ===================== Seed Jobs =====================
-    app.post("/api/jobs/seed", async (req, res) => {
+    app.post("/api/jobs/seed", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const jobs = [
           {
@@ -1161,7 +1640,7 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
     // });
 
     // ========================== Resources Endpoints ==========================
-    app.post("/api/learning/seed", async (req, res) => {
+    app.post("/api/learning/seed", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const resources = [
           {
@@ -1325,9 +1804,19 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
         const { skill, platform, cost } = req.query;
         const query = {};
 
-        if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
-        if (platform) query.platform = { $regex: new RegExp(platform, "i") };
-        if (cost) query.cost = { $regex: new RegExp(cost, "i") };
+        // "skill" may be pipe-joined ("JavaScript|Python") from the dashboard,
+        // so escape each segment and keep "|" as the alternation separator.
+        if (skill)
+          query.relatedSkills = {
+            $regex: new RegExp(
+              skill.split("|").map(escapeRegExp).join("|"),
+              "i"
+            ),
+          };
+        if (platform)
+          query.platform = { $regex: new RegExp(escapeRegExp(platform), "i") };
+        if (cost)
+          query.cost = { $regex: new RegExp(escapeRegExp(cost), "i") };
 
         const resources = await LearningResourcesCollection.find(
           query
@@ -1356,9 +1845,7 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
       }
     });
 
-    // ================= Google Gemini ================
-    // Gemini CV analysis endpoint
-       app.post("/api/cv/analyze", verifyToken, async (req, res) => {
+      app.post("/api/cv/analyze", verifyToken, async (req, res) => {
       try {
         const { cvText } = req.body;
 
@@ -1366,65 +1853,45 @@ app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
           return res.status(400).json({ message: "CV text required" });
         }
 
-        const prompt = `
-Extract strictly:
-1. Key skills
-2. Tools / technologies
-3. Relevant roles/domains
+        // Local extraction first — this never depends on any outside service.
+        const extracted = extractLocal(cvText);
 
-Return ONLY raw JSON with keys: skills, tools, roles.
-No explanation text.
-
-CV:
-${cvText}
-`;
-
-        const response = await fetch(
-          "https://openrouter.ai/api/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "openai/gpt-oss-120b",
-              messages: [
-                {
-                  role: "user",
-                  content: prompt,
-                },
-              ],
-            }),
+        // Role prediction from the team's own trained model. Non-fatal:
+        // if the ML service is down or slow, the request still succeeds
+        // with the keyword roles only.
+        let roles = [...extracted.roles];
+        try {
+          const prediction = await callMLService(cvText);
+          if (prediction && prediction.predicted_category) {
+            roles = [titleCaseCategory(prediction.predicted_category), ...roles];
           }
-        );
-
-        const result = await response.json();
-        console.log(result);
-        const rawText = result?.choices?.[0]?.message?.content?.trim() || "{}";
-
-        let clean = rawText;
-
-        if (clean.startsWith("```json")) {
-          clean = clean.replace(/```json|```/g, "").trim();
+        } catch (err) {
+          console.error(
+            "CV Analyze: ML prediction unavailable, continuing with local extraction:",
+            err.message
+          );
         }
+        // Deduplicate, cap at ~5 roles.
+        roles = [...new Set(roles)].slice(0, 5);
 
-        const parsed = JSON.parse(clean);
-
-        res.status(200).json({ data: parsed });
+        res.status(200).json({
+          data: { skills: extracted.skills, tools: extracted.tools, roles },
+        });
       } catch (err) {
-        console.error("OpenRouter Error:", err);
+        console.error("CV Analysis Error:", err);
         res
           .status(500)
-          .json({ message: "OpenRouter failed", error: err.message });
+          .json({ message: "CV analysis failed", error: err.message });
       }
     });
-
     // ================= Trained ML model (Linear SVM) ================
     // Forwards CV text to the FastAPI ML service (ml-service/) and
     // returns the predicted job category + top-3. This is an extra
     // signal shown next to the rule-based matcher — the rule-based
     // matching code is untouched. Requires ML_SERVICE_URL env var.
+    // The fetch lives in the shared callMLService() helper above; this
+    // handler keeps the exact same behavior as before (400 / 503 / 502
+    // / 200 shapes).
     app.post("/api/ml/predict", verifyToken, async (req, res) => {
       try {
         const { cvText } = req.body;
@@ -1438,31 +1905,7 @@ ${cvText}
               "ML service is not configured (set ML_SERVICE_URL). See ml-service/README.md.",
           });
         }
-        const controller = new AbortController();
-        const timeoutMs = Number(process.env.ML_TIMEOUT_MS || 8000);
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        let response;
-        try {
-          response = await fetch(
-            `${mlServiceUrl.replace(/\/$/, "")}/predict`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ cv_text: cvText }),
-              signal: controller.signal,
-            }
-          );
-        } finally {
-          clearTimeout(timer);
-        }
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          return res.status(502).json({
-            message: "ML service returned an error",
-            error: detail.slice(0, 300),
-          });
-        }
-        const prediction = await response.json();
+        const prediction = await callMLService(cvText);
         res.status(200).json({ data: prediction });
       } catch (err) {
         if (err.name === "AbortError") {
@@ -1471,64 +1914,20 @@ ${cvText}
               "ML service timed out (it may be waking up — please retry in a few seconds)",
           });
         }
+        if (err.mlUpstream) {
+          return res.status(502).json({
+            message: "ML service returned an error",
+            error: err.detail || "",
+          });
+        }
         console.error("ML Service Error:", err);
         res
           .status(502)
           .json({ message: "ML service unreachable", error: err.message });
       }
     });
-    // DELETE a specific job
-app.delete("/api/jobs/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Optional: check if user is admin
-    const user = await UsersCollection.findOne({ email: req.user.email });
-    if (!user || user.role !== "admin") {
-      return res.status(403).json({ message: "Forbidden: Admins only" });
-    }
-
-    const result = await JobsCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0)
-      return res.status(404).json({ message: "Job not found" });
-
-    res.status(200).json({ message: "Job deleted successfully" });
-  } catch (err) {
-    console.error("Delete Job Error:", err);
-    res.status(500).json({ message: "Failed to delete job", error: err.message });
-  }
-});
-// ===== Get All Resources =====
-app.get("/api/learning", async (req, res) => {
-  try {
-    const { skill, platform, cost } = req.query;
-    const query = {};
-
-    if (skill) query.relatedSkills = { $regex: new RegExp(skill, "i") };
-    if (platform) query.platform = { $regex: new RegExp(platform, "i") };
-    if (cost) query.cost = { $regex: new RegExp(cost, "i") };
-
-    const resources = await LearningResourcesCollection.find(query).toArray();
-    res.status(200).json(resources);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch resources", error: error.message });
-  }
-});
-
-// ===== Get Resource by ID =====
-app.get("/api/learning/:id", async (req, res) => {
-  try {
-    const resource = await LearningResourcesCollection.findOne({ _id: new ObjectId(req.params.id) });
-    if (!resource) return res.status(404).json({ message: "Resource not found" });
-    res.status(200).json(resource);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch resource", error: error.message });
-  }
-});
-
 // ===== Create Resource =====
-app.post("/api/learning", async (req, res) => {
+app.post("/api/learning", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const resource = req.body;
     await LearningResourcesCollection.insertOne(resource);
@@ -1539,7 +1938,7 @@ app.post("/api/learning", async (req, res) => {
 });
 
 // ===== Delete Resource =====
-app.delete("/api/learning/:id", async (req, res) => {
+app.delete("/api/learning/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await LearningResourcesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
     if (result.deletedCount === 0) return res.status(404).json({ message: "Resource not found" });
@@ -1550,7 +1949,7 @@ app.delete("/api/learning/:id", async (req, res) => {
 });
 
 // ===== Update Resource (Optional) =====
-app.patch("/api/learning/:id", async (req, res) => {
+app.patch("/api/learning/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const updates = req.body;
     const result = await LearningResourcesCollection.updateOne(

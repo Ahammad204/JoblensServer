@@ -1,4 +1,4 @@
-# AI-Powered Job & Learning Recommendation Dashboard
+# Job & Learning Recommendation Dashboard
 
 ## Project Overview
 This project is a dashboard that recommends jobs and learning resources based on a user’s skills and career track. Users can register, log in, view personalized job/resource matches, track their applications, and monitor learning progress. The system provides transparent, rule-based recommendations for jobs and learning resources.
@@ -38,7 +38,8 @@ This project is a dashboard that recommends jobs and learning resources based on
    ```bash
    npm install
    ```
-3. Create a `.env` file in the backend folder and add:
+3. Create a `.env` file in the backend folder and add (see
+   `.env.example` for the full list of variables the code reads):
 
    ```env
    PORT=5000
@@ -66,10 +67,12 @@ This project is a dashboard that recommends jobs and learning resources based on
 
 ### Frontend Setup
 
-1. Navigate to the frontend folder:
+The frontend lives in a **separate repo** (`joblens-client`) — there is
+no `frontend/` folder here. 1. Clone that repo and follow its README:
 
    ```bash
-   cd ../frontend
+   git clone https://github.com/Ahammad204/joblens-client.git
+   cd joblens-client
    ```
 2. Install dependencies:
 
@@ -132,23 +135,35 @@ This project is a dashboard that recommends jobs and learning resources based on
 ## Folder Structure
 
 ```
-backend/
-  ├─ index.js
-  ├─ package.json
-  └─ .env
-frontend/
-  ├─ src/
-      ├─ components/
-      ├─ pages/
-      ├─ App.jsx
-      └─ main.jsx
-  ├─ package.json
-  └─ vite.config.js
+index.js            — Express server (all routes, including the local ML + rule-based endpoints)
+package.json
+readme.md
+vercel.json         — Vercel deploy config for the Express server
+ml-service/         — FastAPI ML service (separate Vercel project)
+  ├─ app.py
+  ├─ api/index.py
+  ├─ requirements.txt
+  ├─ vercel.json
+  ├─ README.md
+  └─ joblens_best_model.pkl
 ```
+(The frontend is a separate repo — there is no `frontend/` folder here.)
+
+## Already shipped (not future work)
+
+* Local ML + rule-based endpoints already live in `index.js` — no
+  outside LLM is used anywhere: `POST /api/ml/predict` (trained
+  Linear-SVM classifier via `ml-service/`), `POST /api/cv/analyze`
+  (local skill extraction + trained-model role prediction),
+  `POST /api/cv/generate` (template-based, from the user's own
+  profile), `POST /api/chat` (rule-based career assistant), and
+  `POST /api/roadmap/generate` (rule-based, from the Jobs +
+  Learning DB). Forgot/reset-password routes
+  (`POST /api/forgot-password`, `POST /api/reset-password`) are
+  also live.
 
 ## Future Enhancements
 
-* AI-based recommendation engine.
 * Role-based dashboard customization (admin, mentor, user).
 * Notifications for new job/resource matches.
 * Analytics for job applications and learning progress.
